@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Redutor 3D"
+description = "Uma ferramenta profissional para importar malhas 3D, reduzir polígonos com simplificação geométrica real, validar o resultado e exportar STL binário localmente."
+version = "1.0.0"
+id = "artifacts/redutor-3d"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 20943
+
+[services.development]
+run = "pnpm --filter @workspace/redutor-3d run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/redutor-3d", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/redutor-3d/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "20943"
+BASE_PATH = "/"
