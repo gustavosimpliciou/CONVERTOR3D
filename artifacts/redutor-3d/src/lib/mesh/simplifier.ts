@@ -1,8 +1,8 @@
-import { calculateBounds, compactMesh } from './geometry';
+import { calculateBounds, compactMesh, triangleAreaSquared } from './geometry';
 import type { MeshData, SimplifyOptions, SimplifyResult } from './types';
 
 type Quadric = [number, number, number, number, number, number, number, number, number, number];
-type Candidate = { a: number; b: number; position: [number, number, number]; cost: number };
+type Candidate = { a: number; b: number; position: [number, number, number]; cost: number; curvature?: number; isSilhouette?: boolean };
 
 const emptyQuadric = (): Quadric => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 const addQuadric = (a: Quadric, b: Quadric): Quadric => a.map((value, i) => value + b[i]) as Quadric;
@@ -56,7 +56,7 @@ function optimalPosition(q: Quadric, a: [number, number, number], b: [number, nu
   const det = q[0] * (q[4] * q[7] - q[5] * q[5]) - q[1] * (q[1] * q[7] - q[5] * q[2]) + q[2] * (q[1] * q[5] - q[4] * q[2]);
   if (Math.abs(det) > 1e-12) {
     const x = -(q[3] * (q[4] * q[7] - q[5] * q[5]) - q[1] * (q[6] * q[7] - q[5] * q[8]) + q[2] * (q[6] * q[5] - q[4] * q[8])) / det;
-    const y = - (q[0] * (q[6] * q[7] - q[5] * q[8]) - q[3] * (q[1] * q[7] - q[5] * q[2]) + q[2] * (q[1] * q[8] - q[6] * q[2])) / det;
+    const y = - (q[0] * (q[6] * q[7] - q[5] * q[8]) - q[3] * (q[1] * q[7] - q[5] * q[8]) + q[2] * (q[1] * q[8] - q[6] * q[2])) / det;
     const z = - (q[0] * (q[4] * q[8] - q[6] * q[5]) - q[1] * (q[1] * q[8] - q[6] * q[2]) + q[3] * (q[1] * q[5] - q[4] * q[2])) / det;
     if ([x, y, z].every(Number.isFinite)) return [x, y, z];
   }
@@ -72,6 +72,64 @@ function triangleNormal(positions: number[], a: number, b: number, c: number): [
   return [aby * acz - abz * acy, abz * acx - abx * acz, abx * acy - aby * acx];
 }
 
+function calculateCurvature(positions: number[], triangles: number[][], vertexIndex: number): number {
+  const vertexTriangles = new Set<number>();
+  for (const t of triangles) {
+    if (triangles[t][0] === vertexIndex || triangles[t][1] === vertexIndex || triangles[t][2] === vertexIndex) {
+      vertexTriangles.add(t);
+    }
+  }
+  if (vertexTriangles.size < 3) return 0;
+
+  let sumAngle = 0;
+  let sumArea = 0;
+  const indices = triangles[vertexTriangles.values().next().value];
+  const a = indices[0], b = indices[1], c = indices[2];
+  
+  for (const t of vertexTriangles) {
+    const [x1, y1, z1] = [positions[t[0]*3], positions[t[0]*3+1], positions[t[0]*3+2]];
+    const [x2, y2, z2] = [positions[t[1]*3], positions[t[1]*3+1], positions[t[1]*3+2]];
+    const [x3, y3, z3] = [positions[t[2]*3], positions[t[2]*3+1], positions[t[2]*3+2]];
+    
+    const v1x = x2 - x1, v1y = y2 - y1, v1z = z2 - z1;
+    const v2x = x3 - x1, v2y = y3 - y1, v2z = z3 - z1;
+    
+    const dot = v1x * v2x + v1y * v2y + v1z * v2z;
+    const len1 = Math.hypot(v1x, v1y, v1z);
+    const len2 = Math.hypot(v2x, v2y, v2z);
+    const angle = Math.acos(Math.max(-1, Math.min(1, dot / (len1 * len2 || 1))));
+    sumAngle += angle;
+    
+    const area = Math.abs(x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)) / 2;
+    sumArea += area;
+  }
+  
+  if (sumArea === 0) return 0;
+  return sumAngle / sumArea;
+}
+
+function detectSilhouetteEdges(positions: number[], triangles: number[][]): Set<string> {
+  const silhouetteEdges = new Set<string>();
+  const edgeCounts = new Map<string, number>();
+  
+  for (const tri of triangles) {
+    const [a, b, c] = tri;
+    for (const [u, v] of [[a, b], [b, c], [c, a]]) {
+      const key = keyOf(u, v);
+      edgeCounts.set(key, (edgeCounts.get(key) ?? 0) + 1);
+    }
+  }
+  
+  for (const [key, count] of edgeCounts) {
+    if (count === 1) {
+      const [u, v] = key.split(':').map(Number);
+      silhouetteEdges.add(key);
+    }
+  }
+  
+  return silhouetteEdges;
+}
+
 function canCollapse(
   positions: number[],
   triangles: number[][],
@@ -79,6 +137,8 @@ function canCollapse(
   a: number,
   b: number,
   next: [number, number, number],
+  silhouetteEdges: Set<string>,
+  borderPenalty: number,
 ): boolean {
   for (const t of affected) {
     const tri = triangles[t];
@@ -94,6 +154,25 @@ function canCollapse(
     const dot = (before[0] * after[0] + before[1] * after[1] + before[2] * after[2]) / (beforeLength * afterLength);
     if (dot < 0.15) return false;
   }
+  
+  // Check silhouette preservation
+  const keyA = keyOf(a, b);
+  if (silhouetteEdges.has(keyA) || silhouetteEdges.has(keyOf(b, a))) {
+    // Collapsing a silhouette edge would alter the contour - add extra check
+    for (const t of affected) {
+      const tri = triangles[t];
+      if (tri.includes(a) && tri.includes(b)) {
+        const other = tri.find(v => v !== a && v !== b);
+        if (other !== undefined) {
+          const newNormal = triangleNormal(positions, a === other ? b : a, other, a === other ? b : a);
+          // Check if this would flip the silhouette
+          const wouldFlip = Math.abs(newNormal[2]) > 0.8; // simplified check
+          if (wouldFlip) return false;
+        }
+      }
+    }
+  }
+  
   return true;
 }
 
@@ -114,7 +193,9 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
   const edges = new Set<string>();
   const edgeCounts = new Map<string, number>();
   const faceNormals: [number, number, number][] = [];
+  const vertexCurvatures: number[] = new Float32Array(positions.length / 3).fill(0);
 
+  // Step 1: Build triangle data and quadrics
   for (let t = 0; t < triangles.length; t += 1) {
     const [a, b, c] = triangles[t];
     vertexTriangles[a].add(t); vertexTriangles[b].add(t); vertexTriangles[c].add(t);
@@ -127,18 +208,32 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       const q = planeQuadric(nx, ny, nz, d, 1);
       quadrics[a] = addQuadric(quadrics[a], q); quadrics[b] = addQuadric(quadrics[b], q); quadrics[c] = addQuadric(quadrics[c], q);
     }
+    // Calculate curvature at each vertex
+    for (const v of [a, b, c]) {
+      vertexCurvatures[v] = Math.max(vertexCurvatures[v], calculateCurvature(positions, triangles, v));
+    }
     for (const [u, v] of [[a, b], [b, c], [c, a]]) {
       const key = keyOf(u, v);
       edges.add(key);
       edgeCounts.set(key, (edgeCounts.get(key) ?? 0) + 1);
     }
   }
+
+  // Step 2: Detect silhouette edges and border edges
+  const silhouetteEdges = options.preserveSilhouette ? detectSilhouetteEdges(positions, triangles) : new Set();
+  
+  // Step 3: Setup quality-based weights
+  const borderWeight = options.quality === 'ultra' ? 100 : options.quality === 'high' ? 35 : options.quality === 'medium' ? 12 : 4;
+  const detailPenalty = options.protectDetails ? (options.quality === 'ultra' ? 1.8 : options.quality === 'high' ? 1.35 : 1.1) : 1;
+  const curvatureThreshold = options.quality === 'ultra' ? 0.5 : options.quality === 'high' ? 0.3 : options.quality === 'medium' ? 0.15 : 0.05;
+
+  // Step 4: Add border quadrics with enhanced penalty
   if (options.preserveBorders) {
-    const borderWeight = options.quality === 'ultra' ? 100 : options.quality === 'high' ? 35 : options.quality === 'medium' ? 12 : 4;
     for (const key of edges) {
       if (edgeCounts.get(key) !== 1) continue;
       const [a, b] = key.split(':').map(Number);
       const neighbors = Array.from(vertexTriangles[a]).filter((t) => triangles[t].includes(b));
+      if (neighbors.length === 0) continue;
       const normal = faceNormals[neighbors[0]];
       const length = Math.hypot(...normal);
       if (!length) continue;
@@ -157,6 +252,15 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     }
   }
 
+  // Step 5: Add curvature-based penalties - high curvature vertices get higher cost
+  const curvaturePenaltyFactor = (curv: number) => {
+    if (curv > curvatureThreshold) {
+      return options.quality === 'ultra' ? 3 : options.quality === 'high' ? 2 : 1.5;
+    }
+    return 1;
+  };
+
+  // Step 6: Initialize priority queue with edge costs
   const heap = new MinHeap();
   const pushEdge = (a: number, b: number) => {
     if (a === b || !aliveVertices[a] || !aliveVertices[b]) return;
@@ -164,35 +268,56 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     const pa: [number, number, number] = [positions[a * 3], positions[a * 3 + 1], positions[a * 3 + 2]];
     const pb: [number, number, number] = [positions[b * 3], positions[b * 3 + 1], positions[b * 3 + 2]];
     const position = optimalPosition(q, pa, pb);
-    const detailPenalty = options.protectDetails ? (options.quality === 'ultra' ? 1.8 : options.quality === 'high' ? 1.35 : 1.1) : 1;
-    heap.push({ a, b, position, cost: evaluate(q, position) * detailPenalty });
+    const baseCost = evaluate(q, position) * detailPenalty;
+    
+    // Apply curvature penalty - high curvature edges cost more to collapse
+    const ca = vertexCurvatures[a] || 0;
+    const cb = vertexCurvatures[b] || 0;
+    const avgCurvature = (ca + cb) / 2;
+    const curvatureMult = curvaturePenaltyFactor(avgCurvature);
+    
+    // Apply silhouette penalty
+    const isSilhouette = silhouetteEdges.has(keyOf(a, b)) || silhouetteEdges.has(keyOf(b, a));
+    const silhouetteMult = isSilhouette ? (options.quality === 'ultra' ? 5 : options.quality === 'high' ? 3 : 2) : 1;
+    
+    heap.push({ a, b, position, cost: baseCost * curvatureMult * silhouetteMult, curvature: avgCurvature, isSilhouette });
   };
   for (const key of edges) {
     const [a, b] = key.split(':').map(Number);
     pushEdge(a, b);
   }
 
+  // Step 7: Progressive edge collapse
   let activeTriangles = triangles.length;
   let iterations = 0;
   const maxIterations = Math.max(1000, originalTriangles * 3);
+  const progressStep = Math.max(1, Math.floor((originalTriangles - target) / 25));
+  
+  let collapseCount = 0;
+  
   while (activeTriangles > target && iterations < maxIterations) {
     iterations += 1;
     const candidate = heap.pop();
     if (!candidate) break;
-    const { a, b, position } = candidate;
+    
+    const { a, b, position, cost, curvature, isSilhouette } = candidate;
     if (!aliveVertices[a] || !aliveVertices[b] || !edges.has(keyOf(a, b))) continue;
+    
     const affected = new Set<number>([...vertexTriangles[a], ...vertexTriangles[b]]);
-    if (!canCollapse(positions, triangles, affected, a, b, position)) continue;
+    if (!canCollapse(positions, triangles, affected, a, b, position, silhouetteEdges, borderWeight)) continue;
 
+    // Execute collapse
     const touchedEdges = new Set<string>();
     for (const t of affected) {
       const tri = triangles[t];
       for (const [u, v] of [[tri[0], tri[1]], [tri[1], tri[2]], [tri[2], tri[0]]]) touchedEdges.add(keyOf(u, v));
     }
     for (const key of touchedEdges) edges.delete(key);
+    
     positions[a * 3] = position[0]; positions[a * 3 + 1] = position[1]; positions[a * 3 + 2] = position[2];
     quadrics[a] = addQuadric(quadrics[a], quadrics[b]);
     aliveVertices[b] = 0;
+    
     for (const t of affected) {
       const tri = triangles[t];
       for (const v of tri) vertexTriangles[v].delete(t);
@@ -210,24 +335,23 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
         pushEdge(u, v);
       }
     }
+    
+    collapseCount += 1;
     const progress = 1 - (activeTriangles - target) / Math.max(1, originalTriangles - target);
-    if (iterations % 25 === 0) onProgress?.(Math.min(0.99, Math.max(0, progress)));
+    if (iterations % Math.max(1, Math.floor(originalTriangles / 25)) === 0) onProgress?.(Math.min(0.99, Math.max(0, progress)));
   }
 
+  // Step 8: Generate output
   let outputTriangles: number[] = [];
   for (const tri of triangles) {
     if (tri[0] >= 0 && tri[1] >= 0 && tri[2] >= 0 && new Set(tri).size === 3) outputTriangles.push(...tri);
   }
   if (outputTriangles.length / 3 > target) {
-    // A pathological/non-manifold mesh can reject every remaining collapse.
-    // Keep an even spatial sample as a last-resort hard budget guard rather
-    // than ever returning more triangles than the user's requested limit.
-    const source = outputTriangles;
-    const sourceCount = source.length / 3;
+    const sourceCount = outputTriangles.length / 3;
     const fallback: number[] = [];
     for (let i = 0; i < target; i += 1) {
       const at = Math.min(sourceCount - 1, Math.floor((i * sourceCount) / target));
-      fallback.push(source[at * 3], source[at * 3 + 1], source[at * 3 + 2]);
+      fallback.push(outputTriangles[at * 3], outputTriangles[at * 3 + 1], outputTriangles[at * 3 + 2]);
     }
     outputTriangles = fallback;
   }

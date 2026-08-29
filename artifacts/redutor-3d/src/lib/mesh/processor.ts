@@ -14,6 +14,7 @@ export type ProcessorEvent =
 
 export function createMeshProcessor() {
   let worker: Worker | undefined;
+  let progressHistory: WorkerProgress[] = [];
 
   return {
     process(
@@ -22,15 +23,20 @@ export function createMeshProcessor() {
       options: SimplifyOptions,
       onEvent: (event: ProcessorEvent) => void,
     ) {
+      progressHistory = [];
       worker?.terminate();
       worker = new Worker(new URL('./mesh.worker.ts', import.meta.url), { type: 'module' });
       worker.onmessage = (event: MessageEvent<WorkerProgress | WorkerSuccess | WorkerFailure>) => {
-        if (event.data.type === 'progress') onEvent({ type: 'progress', data: event.data });
+        if (event.data.type === 'progress') {
+          progressHistory.push(event.data);
+          onEvent({ type: 'progress', data: event.data });
+        }
         else if (event.data.type === 'complete') {
           onEvent({ type: 'complete', data: event.data });
           worker?.terminate();
           worker = undefined;
-        } else {
+        }
+        else {
           onEvent({ type: 'error', data: event.data });
           worker?.terminate();
           worker = undefined;
@@ -57,32 +63,18 @@ export function createMeshProcessor() {
         preserveBorders: options.preserveBorders,
         preserveSilhouette: options.preserveSilhouette,
         protectDetails: options.protectDetails,
+        distributeFacesProportionally: options.distributeFacesProportionally,
       };
       worker.postMessage(request, [buffer]);
     },
+
     cancel() {
       worker?.terminate();
       worker = undefined;
     },
-  };
-}
 
-export function meshDataFromSuccess(data: WorkerSuccess, format: MeshData['format']): MeshData {
-  return {
-    positions: data.positions,
-    indices: data.indices,
-    format,
-    bounds: data.reduced.bounds,
+    getProgressHistory() {
+      return progressHistory;
+    }
   };
-}
-
-export function downloadStl(buffer: ArrayBuffer, fileName: string) {
-  const url = URL.createObjectURL(new Blob([buffer], { type: 'model/stl' }));
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = fileName.replace(/\.[^.]+$/, '') + '_reduzido.stl';
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
