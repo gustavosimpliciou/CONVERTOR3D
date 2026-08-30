@@ -42,13 +42,13 @@ export function createMeshProcessor() {
           worker = undefined;
         }
       };
-      worker.onerror = (event) => {
+      worker.onerror = (event: ErrorEvent) => {
         onEvent({
           type: 'error',
           data: {
             type: 'error',
             message: 'O navegador não conseguiu concluir o processamento deste arquivo.',
-            technical: event.message,
+            technical: event.message ?? 'Erro desconhecido do worker',
           },
         });
         worker?.terminate();

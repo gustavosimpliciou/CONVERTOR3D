@@ -248,8 +248,8 @@ function Home() {
         }
         processorRef.current = undefined;
       } else {
-        console.error('Mesh processor error', event.data.technical);
-        setError(event.data.message); setPhase('error'); setProgress(0); processorRef.current = undefined;
+        console.error('Mesh processor error', event.data.technical ?? 'Erro técnico desconhecido');
+        setError(event.data.message ?? 'Não foi possível processar este modelo com segurança.'); setPhase('error'); setProgress(0); processorRef.current = undefined;
       }
     });
   }, [model, settings]);
