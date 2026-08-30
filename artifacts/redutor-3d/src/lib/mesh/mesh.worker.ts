@@ -22,6 +22,7 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
       preserveBorders: request.preserveBorders,
       preserveSilhouette: request.preserveSilhouette,
       protectDetails: request.protectDetails,
+      distributeFacesProportionally: request.distributeFacesProportionally,
     }, (progress) => post({ type: 'progress', phase: 'simplifying', progress: 0.2 + progress * 0.58, message: 'Simplificando com preservação de detalhes…' }));
     const reducedMesh: MeshData = {
       positions: result.positions,

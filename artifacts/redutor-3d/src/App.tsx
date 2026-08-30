@@ -45,6 +45,7 @@ type Settings = {
   borders: boolean;
   silhouette: boolean;
   details: boolean;
+  distribute: boolean;
   unit: Unit;
 };
 type ReducedMeta = {
@@ -60,6 +61,7 @@ const SUPPORTED_FORMATS_LABEL = 'STL · OBJ · PLY · OFF · GLB · GLTF · FBX 
 const QUALITY_LABELS: Record<Quality, string> = {
   low: 'Rascunho',
   medium: 'Equilibrada',
+  speed: 'Produção',
   high: 'Preservação',
   ultra: 'Ultra',
 };
@@ -218,7 +220,7 @@ function Home() {
   const [message, setMessage] = useState('preparando malha');
   const [comparing, setComparing] = useState(false);
   const [notice, setNotice] = useState('');
-  const [settings, setSettings] = useState<Settings>({ target: 200000, quality: 'high', borders: true, silhouette: true, details: true, unit: 'mm' });
+  const [settings, setSettings] = useState<Settings>({ target: 200000, quality: 'high', borders: true, silhouette: true, details: true, distribute: false, unit: 'mm' });
 
   const reset = useCallback(() => {
     processorRef.current?.cancel();
@@ -231,7 +233,7 @@ function Home() {
     const processor = createMeshProcessor();
     processorRef.current = processor;
     setPhase('processing'); setProgress(2); setMessage(isImport ? 'lendo estrutura do arquivo' : 'analisando topologia'); setError(''); setNotice('');
-    processor.process(await file.arrayBuffer(), file.name, { targetTriangles, quality: settings.quality, preserveBorders: settings.borders, preserveSilhouette: settings.silhouette, protectDetails: settings.details }, (event) => {
+    processor.process(await file.arrayBuffer(), file.name, { targetTriangles, quality: settings.quality, preserveBorders: settings.borders, preserveSilhouette: settings.silhouette, protectDetails: settings.details, distributeFacesProportionally: settings.distribute }, (event) => {
       if (event.type === 'progress') {
         setProgress(Math.round(event.data.progress * 100));
         setMessage(event.data.message.replace('…', ''));
