@@ -1,8 +1,0 @@
-[build]
-  command = "pnpm build --config artifacts/redutor-3d/vite.config.ts"
-  publish = "artifacts/redutor-3d/dist/public"
-
-[[redirects]]
-  from = "/*"
-  to = "/index.html"
-  status = 200
