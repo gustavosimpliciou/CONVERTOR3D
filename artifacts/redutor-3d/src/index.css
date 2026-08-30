@@ -1,0 +1,159 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@plugin "@tailwindcss/typography";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-card-border: hsl(var(--card-border));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-popover-border: hsl(var(--popover-border));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-primary-border: var(--primary-border);
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-secondary-border: var(--secondary-border);
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-sidebar: hsl(var(--sidebar));
+  --color-sidebar-foreground: hsl(var(--sidebar-foreground));
+  --color-sidebar-border: hsl(var(--sidebar-border));
+  --font-sans: var(--app-font-sans);
+  --font-mono: var(--app-font-mono);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  --background: 30 7% 5%;
+  --foreground: 36 11% 91%;
+  --border: 30 7% 17%;
+  --input: 30 8% 14%;
+  --ring: 24 100% 58%;
+  --card: 30 8% 8%;
+  --card-foreground: 36 11% 91%;
+  --card-border: 30 7% 17%;
+  --popover: 30 8% 9%;
+  --popover-foreground: 36 11% 91%;
+  --popover-border: 30 7% 21%;
+  --primary: 24 100% 58%;
+  --primary-foreground: 26 16% 7%;
+  --primary-border: hsl(24 100% 58%);
+  --secondary: 30 7% 13%;
+  --secondary-foreground: 35 9% 82%;
+  --secondary-border: hsl(30 7% 22%);
+  --muted: 30 6% 11%;
+  --muted-foreground: 30 5% 54%;
+  --accent: 25 92% 13%;
+  --accent-foreground: 24 100% 72%;
+  --destructive: 4 78% 56%;
+  --destructive-foreground: 0 0% 98%;
+  --sidebar: 30 8% 7%;
+  --sidebar-foreground: 35 9% 82%;
+  --sidebar-border: 30 7% 15%;
+  --app-font-sans: 'Space Grotesk', sans-serif;
+  --app-font-mono: 'DM Mono', monospace;
+  --radius: 0.35rem;
+  --shadow-sm: 0 8px 24px rgba(0,0,0,.22);
+  --shadow-lg: 0 16px 48px rgba(0,0,0,.32);
+}
+
+* { box-sizing: border-box; }
+html { background: hsl(var(--background)); }
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100dvh;
+  font-family: var(--app-font-sans);
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-synthesis: none;
+}
+button, input, select { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .48; }
+::selection { background: hsl(var(--primary) / .25); color: hsl(var(--foreground)); }
+
+.app-shell {
+  position: relative;
+  min-height: 100dvh;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 74% 12%, rgba(222, 72, 17, .055), transparent 29rem),
+    hsl(var(--background));
+}
+.app-shell::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: .16;
+  background-image: linear-gradient(rgba(236, 131, 72, .07) 1px, transparent 1px), linear-gradient(90deg, rgba(236, 131, 72, .07) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: linear-gradient(to bottom, black, transparent 80%);
+}
+.app-shell::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: .03;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.45'/%3E%3C/svg%3E");
+}
+.mono { font-family: var(--app-font-mono); }
+.eyebrow { font-family: var(--app-font-mono); font-size: 10px; letter-spacing: .17em; text-transform: uppercase; color: hsl(var(--muted-foreground)); }
+.panel {
+  border: 1px solid hsl(var(--border));
+  background: linear-gradient(135deg, rgba(255,255,255,.022), rgba(255,255,255,.008));
+  box-shadow: var(--shadow-sm);
+}
+.button-primary {
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+  border: 1px solid hsl(var(--primary));
+  transition: transform .18s ease, filter .18s ease, box-shadow .18s ease;
+}
+.button-primary:hover:not(:disabled) { filter: brightness(1.08); transform: translateY(-1px); box-shadow: 0 7px 22px rgba(255, 105, 34, .2); }
+.button-secondary {
+  color: hsl(var(--foreground));
+  background: hsl(var(--secondary));
+  border: 1px solid hsl(var(--border));
+  transition: background .18s ease, border-color .18s ease, transform .18s ease;
+}
+.button-secondary:hover:not(:disabled) { background: hsl(var(--secondary) / .82); border-color: hsl(var(--primary) / .42); transform: translateY(-1px); }
+.field {
+  width: 100%;
+  border: 1px solid hsl(var(--input));
+  background: rgba(11, 10, 9, .75);
+  color: hsl(var(--foreground));
+  outline: none;
+  transition: border-color .18s ease, box-shadow .18s ease;
+}
+.field:focus { border-color: hsl(var(--primary) / .76); box-shadow: 0 0 0 3px hsl(var(--primary) / .1); }
+.animate-in { animation: fade-up .45s ease both; }
+.animate-in-delay { animation: fade-up .45s .1s ease both; }
+@keyframes fade-up { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes pulse-line { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+.processing-line { animation: pulse-line 1.4s ease-in-out infinite; }
+.spinner { animation: spin .85s linear infinite; }
+
+@media (max-width: 900px) {
+  .app-shell::before { background-size: 32px 32px; }
+}

@@ -1,0 +1,1152 @@
+Você é um engenheiro de software sênior, especialista em computação gráfica, processamento de malhas 3D, geometria computacional, WebGL/WebGPU, otimização de arquivos 3D e desenvolvimento de aplicações profissionais de modelagem.
+
+Preciso implementar um NOVO MÓDULO dentro da minha aplicação 3D chamado:
+
+"REDUTOR 3D"
+
+O objetivo é permitir que o usuário carregue um modelo 3D pesado, reduza automaticamente a quantidade de faces/polígonos mantendo a maior fidelidade geométrica possível e, ao final, exporte obrigatoriamente o resultado em formato STL.
+
+A ferramenta deve ter funcionamento profissional, robusto, rápido e otimizado para não travar o navegador ou o computador do usuário.
+
+==================================================
+1. OBJETIVO PRINCIPAL
+==================================================
+
+Criar uma ferramenta capaz de receber modelos 3D com milhões de faces e executar redução inteligente de geometria.
+
+Exemplo:
+
+MODELO ORIGINAL:
+2.000.000 faces
+
+MODELO REDUZIDO:
+máximo de 200.000 faces
+
+A redução deve ser de até 90%, quando necessário.
+
+O sistema NÃO deve simplesmente remover faces aleatoriamente.
+
+Utilizar algoritmo profissional de simplificação de malha baseado em:
+
+- Quadric Error Metrics (QEM)
+- Edge Collapse
+- Progressive Mesh Simplification
+- preservação de bordas
+- preservação de silhueta
+- preservação de regiões de alta curvatura
+- preservação de detalhes geométricos importantes
+
+Priorizar sempre a qualidade visual/geometria sobre uma redução destrutiva.
+
+==================================================
+2. REGRA DO LIMITE DE FACES
+==================================================
+
+O usuário deve informar a quantidade máxima de faces desejada.
+
+Exemplos:
+
+50.000
+100.000
+200.000
+500.000
+
+Por padrão:
+
+MAXIMUM TRIANGLES = 200.000
+
+Regra obrigatória:
+
+Se o modelo possui 2.000.000 faces:
+
+Original:
+2.000.000
+
+Alvo:
+200.000
+
+Resultado:
+<= 200.000 faces
+
+NUNCA ultrapassar o limite informado pelo usuário.
+
+Se o modelo original já possuir menos faces que o limite:
+
+NÃO realizar redução desnecessária.
+
+Exemplo:
+
+Original = 120.000
+Limite = 200.000
+
+Resultado:
+120.000
+
+==================================================
+3. QUALIDADE DA REDUÇÃO
+==================================================
+
+A redução deve tentar manter:
+
+- silhueta externa
+- proporções
+- volume
+- contornos
+- detalhes importantes
+- superfícies curvas
+- bordas importantes
+- regiões de alta curvatura
+- aparência geral do modelo
+- orientação das normais
+- conectividade da malha quando possível
+
+Evitar:
+
+- deformações visíveis
+- buracos
+- inversão de faces
+- superfícies quebradas
+- artefatos
+- spikes
+- faces degeneradas
+- vértices duplicados desnecessariamente
+- alterações de escala
+- alteração de orientação
+- alteração da posição do modelo
+
+O objetivo NÃO é apenas diminuir o tamanho do arquivo.
+
+O objetivo é produzir uma malha geometricamente simplificada e utilizável em impressão 3D.
+
+==================================================
+4. ALGORITMO DE DECIMAÇÃO
+==================================================
+
+Implementar um pipeline semelhante ao utilizado por softwares profissionais de processamento de malhas.
+
+Pipeline recomendado:
+
+1. Importar modelo
+2. Validar geometria
+3. Normalizar estrutura interna
+4. Remover vértices duplicados quando seguro
+5. Identificar faces degeneradas
+6. Corrigir problemas básicos de topologia
+7. Calcular normais
+8. Identificar bordas importantes
+9. Calcular curvatura
+10. Criar Quadrics
+11. Calcular custo de colapso de arestas
+12. Executar Edge Collapse
+13. Recalcular prioridades
+14. Continuar até atingir o target de faces
+15. Executar limpeza final
+16. Validar a malha
+17. Gerar STL binário
+18. Validar o STL gerado
+19. Disponibilizar download
+
+Utilizar Quadric Error Metrics como algoritmo principal de simplificação.
+
+A implementação deve priorizar estabilidade e qualidade.
+
+==================================================
+5. PRESERVAÇÃO DE DETALHES
+==================================================
+
+Não distribuir a redução uniformemente pelo modelo.
+
+Detectar automaticamente:
+
+- regiões planas
+- regiões curvas
+- regiões de alta curvatura
+- bordas
+- cantos
+- detalhes pequenos
+- mudanças bruscas de superfície
+
+Em áreas planas:
+
+Permitir maior simplificação.
+
+Em áreas complexas:
+
+Reduzir menos.
+
+Em bordas importantes:
+
+Aplicar penalidade para evitar colapso prematuro.
+
+Em regiões de alta curvatura:
+
+Preservar maior densidade de triângulos.
+
+Criar pesos adaptativos para determinar quais regiões podem perder mais geometria.
+
+==================================================
+6. PRESERVAÇÃO DE SILHUETA
+==================================================
+
+A silhueta do modelo deve receber prioridade elevada.
+
+Evitar operações de simplificação que alterem drasticamente:
+
+- contorno externo
+- formato geral
+- extremidades
+- pontas
+- cantos
+- recortes
+- áreas externas visíveis
+
+Adicionar penalidade ao custo do Edge Collapse quando a operação causar alteração significativa na silhueta.
+
+==================================================
+7. PROTEÇÃO CONTRA ERROS DE TOPOLOGIA
+==================================================
+
+O algoritmo deve rejeitar operações que possam produzir:
+
+- faces invertidas
+- faces degeneradas
+- área próxima de zero
+- non-manifold edges
+- colapsos inválidos
+- self-intersections óbvias
+- perda de componentes importantes
+- buracos acidentais
+- alterações catastróficas na geometria
+
+Antes de aceitar cada operação de simplificação:
+
+validar se a operação é geometricamente segura.
+
+==================================================
+8. MODELOS COM MÚLTIPLAS PARTES
+==================================================
+
+O sistema deve suportar modelos compostos por múltiplos componentes.
+
+Exemplo:
+
+Personagem:
+
+- corpo
+- cabeça
+- cabelo
+- roupa
+- acessórios
+
+NÃO unir componentes separados automaticamente apenas para facilitar a redução.
+
+Cada componente deve poder ser processado de maneira independente quando necessário.
+
+Criar estratégia de distribuição do target de faces entre componentes.
+
+Exemplo:
+
+Modelo:
+
+Componente A = 1.000.000 faces
+Componente B = 500.000
+Componente C = 500.000
+
+Target total = 200.000
+
+Distribuir aproximadamente proporcionalmente à complexidade, mantendo componentes importantes com densidade suficiente.
+
+==================================================
+9. MODELOS ABERTOS E FECHADOS
+==================================================
+
+Detectar se a malha é:
+
+- manifold
+- non-manifold
+- aberta
+- fechada
+
+Não exigir que todo modelo seja watertight apenas para realizar a redução.
+
+Entretanto, para impressão 3D, informar possíveis problemas.
+
+Exemplo de aviso:
+
+"Esta malha possui problemas de topologia que podem afetar a impressão 3D."
+
+Não bloquear automaticamente o usuário, exceto quando a geometria estiver impossibilitada de ser processada.
+
+==================================================
+10. FORMATOS DE ENTRADA
+==================================================
+
+O sistema deve aceitar o maior número possível de formatos 3D comuns.
+
+Priorizar suporte para:
+
+.STL
+.OBJ
+.3MF
+.PLY
+.GLTF
+.GLB
+.OFF
+
+Quando tecnicamente possível, adicionar:
+
+.FBX
+.DAE
+.STEP
+.IGES
+
+Caso algum formato não seja suportado diretamente pelo mecanismo utilizado no navegador, implementar conversão através de biblioteca adequada ou processamento backend.
+
+O sistema deve detectar automaticamente o formato.
+
+Não confiar somente na extensão do arquivo.
+
+==================================================
+11. FORMATO DE SAÍDA
+==================================================
+
+Independentemente do formato original:
+
+A SAÍDA PADRÃO DEVE SER:
+
+.STL
+
+Preferencialmente:
+
+STL BINÁRIO
+
+Não gerar ASCII STL por padrão, pois o STL binário é significativamente mais eficiente para arquivos grandes.
+
+Nome do arquivo:
+
+nome_original_reduzido.stl
+
+Exemplo:
+
+dragon.obj
+
+resultado:
+
+dragon_reduzido.stl
+
+==================================================
+12. IMPORTANTE SOBRE STL
+==================================================
+
+STL armazena principalmente geometria triangular.
+
+Não tentar preservar informações que o formato STL não suporta de maneira nativa, como:
+
+- texturas
+- UV maps
+- materiais complexos
+- rigging
+- animações
+- hierarquia de cena
+- informações avançadas de materiais
+
+A aplicação deve avisar o usuário:
+
+"STL preserva a geometria do modelo. Texturas, materiais, UVs e outras informações não suportadas pelo STL serão descartadas na conversão."
+
+Não considerar isso como erro de conversão.
+
+==================================================
+13. ESCALA E UNIDADES
+==================================================
+
+Preservar rigorosamente as coordenadas geométricas.
+
+Não alterar:
+
+- escala
+- posição
+- rotação
+- proporção
+
+Quando o formato de origem possuir unidades explícitas, interpretar corretamente.
+
+Para formatos sem unidade explícita, manter os valores originais e permitir que o usuário selecione a unidade quando necessário:
+
+- mm
+- cm
+- m
+- inch
+
+Nunca alterar a escala silenciosamente.
+
+==================================================
+14. VALIDAÇÃO ANTES DA EXPORTAÇÃO
+==================================================
+
+Antes de gerar o STL:
+
+verificar:
+
+- número de faces
+- número de vértices
+- bounding box
+- escala
+- existência de NaN
+- existência de Infinity
+- faces degeneradas
+- normais inválidas
+- geometria vazia
+- índices inválidos
+
+Se:
+
+target = 200.000
+
+o resultado final precisa possuir:
+
+faces <= 200.000
+
+Mostrar:
+
+Faces originais
+Faces finais
+Percentual de redução
+Tamanho original
+Tamanho final
+Tempo de processamento
+
+Exemplo:
+
+FACES ORIGINAIS
+2.000.000
+
+FACES FINAIS
+198.432
+
+REDUÇÃO
+90,08%
+
+ARQUIVO ORIGINAL
+84,6 MB
+
+ARQUIVO FINAL
+8,7 MB
+
+STATUS:
+✓ Otimização concluída
+
+==================================================
+15. VALIDAÇÃO DO STL
+==================================================
+
+Após gerar o STL:
+
+Executar uma segunda validação independente.
+
+Verificar:
+
+- quantidade de triângulos
+- índices
+- normais
+- valores numéricos
+- bounding box
+- tamanho do arquivo
+- integridade do buffer
+
+O botão DOWNLOAD só deve ser habilitado quando a validação terminar com sucesso.
+
+Se ocorrer erro:
+
+NÃO gerar arquivo corrompido.
+
+Mostrar:
+
+"Não foi possível concluir a conversão com segurança. O modelo original foi preservado."
+
+==================================================
+16. PERFORMANCE
+==================================================
+
+Esta é uma prioridade crítica.
+
+A ferramenta deve funcionar de forma fluida mesmo com modelos extremamente pesados.
+
+NÃO executar todo o processamento pesado diretamente na UI thread.
+
+Utilizar:
+
+Web Worker
+
+para processamento em segundo plano.
+
+Quando disponível, considerar:
+
+WebAssembly
+Web Workers
+SharedArrayBuffer
+OffscreenCanvas
+WebGL/WebGPU
+
+para acelerar processamento.
+
+A interface nunca deve congelar durante a redução.
+
+O usuário deve continuar conseguindo visualizar:
+
+- progresso
+- percentual
+- etapa atual
+- status
+
+==================================================
+17. PROCESSAMENTO EM ETAPAS
+==================================================
+
+Mostrar uma barra de progresso real.
+
+Exemplo:
+
+CARREGANDO MODELO
+████████░░ 80%
+
+ANALISANDO GEOMETRIA
+██████░░░░ 60%
+
+CALCULANDO MALHA
+████████░░ 85%
+
+SIMPLIFICANDO
+█████████░ 90%
+
+VALIDANDO
+██████████ 100%
+
+EXPORTANDO STL
+██████████ 100%
+
+CONCLUÍDO
+
+Não utilizar uma barra falsa que fique parada em um percentual arbitrário.
+
+O progresso deve representar etapas reais.
+
+==================================================
+18. CANCELAMENTO
+==================================================
+
+Adicionar botão:
+
+"CANCELAR"
+
+O usuário poderá interromper uma operação pesada.
+
+Quando cancelar:
+
+- encerrar worker
+- liberar memória
+- descartar malha temporária
+- manter arquivo original intacto
+- restaurar interface
+
+Mostrar:
+
+"Processamento cancelado. O arquivo original não foi alterado."
+
+==================================================
+19. MEMÓRIA
+==================================================
+
+O sistema deve evitar duplicações desnecessárias da geometria.
+
+Modelos com milhões de faces podem consumir centenas de MB de RAM.
+
+Utilizar estruturas eficientes:
+
+Float32Array
+Uint32Array
+TypedArrays
+
+quando apropriado.
+
+Liberar buffers temporários assim que não forem mais necessários.
+
+Evitar armazenar múltiplas cópias completas do modelo.
+
+==================================================
+20. INTERFACE
+==================================================
+
+Criar uma interface visual inspirada diretamente na identidade da ferramenta mostrada na referência.
+
+Estética:
+
+- fundo predominantemente preto
+- interface dark
+- detalhes em laranja
+- linhas discretas
+- visual tecnológico
+- minimalista
+- profissional
+- aparência de software 3D premium
+
+Paleta aproximada:
+
+Background:
+#050505
+
+Painéis:
+#0B0B0B
+
+Borders:
+#1C1C1C
+
+Primary Orange:
+#FF6A00
+
+Orange Hover:
+#FF7A1A
+
+Text Primary:
+#F2F2F2
+
+Text Secondary:
+#8A8A8A
+
+Não copiar literalmente a interface de terceiros.
+
+Usar apenas a referência visual para criar uma identidade própria semelhante.
+
+==================================================
+21. LAYOUT
+==================================================
+
+Estrutura sugerida:
+
+HEADER
+
+Logo:
+REDUCE 3D
+
+Menu:
+
+Open
+Optimize
+Export
+Config
+
+Área central:
+
+VISUALIZAÇÃO 3D
+
+Grid opcional.
+
+Controles de câmera:
+
+Orbit
+Pan
+Zoom
+Fit
+
+Painel lateral:
+
+OPTIMIZATION
+
+Original Faces:
+2.000.000
+
+Target Faces:
+200.000
+
+Reduction:
+90%
+
+Estimated Result:
+~198.000
+
+Quality:
+HIGH
+
+Preserve Borders:
+ON
+
+Preserve Silhouette:
+ON
+
+Protect Details:
+ON
+
+Botão principal:
+
+OPTIMIZE MODEL
+
+Após processamento:
+
+EXPORT STL
+
+==================================================
+22. SLIDER DE QUALIDADE
+==================================================
+
+Adicionar controle:
+
+QUALITY
+
+LOW
+MEDIUM
+HIGH
+ULTRA
+
+Porém, o limite máximo de faces informado pelo usuário deve sempre prevalecer.
+
+Exemplo:
+
+Quality = ULTRA
+Target = 200.000
+
+Nunca ultrapassar 200.000.
+
+A qualidade deve controlar parâmetros internos do algoritmo, como:
+
+- penalidade de borda
+- preservação de curvatura
+- tolerância geométrica
+- proteção de detalhes
+- critérios de colapso
+
+==================================================
+23. COMPARAÇÃO ORIGINAL VS REDUZIDO
+==================================================
+
+Criar opção:
+
+COMPARE
+
+Permitir alternar entre:
+
+ORIGINAL
+REDUCED
+
+Adicionar estatísticas:
+
+Original:
+2.000.000 faces
+
+Reduced:
+200.000 faces
+
+Reduction:
+90%
+
+Se possível, permitir visualização:
+
+Before / After
+
+sem duplicar desnecessariamente toda a geometria na memória.
+
+==================================================
+24. PREVIEW 3D
+==================================================
+
+A viewport deve ser otimizada.
+
+Utilizar:
+
+Three.js
+
+ou outra biblioteca WebGL/WebGPU adequada.
+
+Não renderizar milhões de faces desnecessariamente após o processamento.
+
+Utilizar:
+
+frustum culling
+BufferGeometry
+indexed geometry
+GPU acceleration
+
+quando apropriado.
+
+Ativar antialiasing apenas quando o impacto de performance for aceitável.
+
+==================================================
+25. ARQUIVOS GRANDES
+==================================================
+
+Suportar modelos grandes sem travar a interface.
+
+Criar limites seguros de memória.
+
+Se o navegador não possuir memória suficiente:
+
+mostrar mensagem clara:
+
+"Este modelo é muito grande para ser processado com segurança neste dispositivo. Tente reduzir o modelo original ou utilizar o processamento avançado."
+
+Não deixar o navegador travar.
+
+==================================================
+26. BACKEND OPCIONAL
+==================================================
+
+Arquitetar o sistema para permitir futuramente processamento backend.
+
+Criar uma camada de abstração:
+
+MeshProcessor
+
+com possibilidade de:
+
+BrowserProcessor
+ServerProcessor
+
+No futuro, modelos extremamente grandes poderão ser enviados para processamento no servidor.
+
+Porém, sempre que possível, modelos menores devem ser processados localmente para economizar servidor e melhorar privacidade/performance.
+
+==================================================
+27. SEGURANÇA
+==================================================
+
+Nunca executar arquivos enviados pelo usuário.
+
+Tratar todos os arquivos como dados.
+
+Validar:
+
+extensão
+MIME
+estrutura
+tamanho
+buffers
+
+Impedir:
+
+buffer overflow
+memory exhaustion
+arquivos malformados
+dados infinitos
+NaN
+Infinity
+
+Limitar tamanho máximo de upload configurável.
+
+==================================================
+28. TRATAMENTO DE ERROS
+==================================================
+
+Criar mensagens amigáveis.
+
+Exemplos:
+
+"Formato não suportado."
+
+"Não foi possível ler a geometria."
+
+"Arquivo 3D corrompido."
+
+"Malha vazia."
+
+"Memória insuficiente para processar este modelo."
+
+"Falha durante a simplificação."
+
+"Falha durante a geração do STL."
+
+"STL gerado e validado com sucesso."
+
+Nunca mostrar apenas erros técnicos incompreensíveis ao usuário.
+
+No console, entretanto, registrar informações técnicas detalhadas para debugging.
+
+==================================================
+29. PERFORMANCE ALVO
+==================================================
+
+O sistema deve ser desenvolvido pensando em computadores comuns.
+
+Prioridades:
+
+1. Não travar UI
+2. Baixo consumo de memória
+3. Processamento paralelo
+4. GPU quando aplicável
+5. Web Worker
+6. Algoritmos eficientes
+7. Liberação de memória
+8. Processamento incremental
+
+Não implementar algoritmos O(n²) desnecessários sobre milhões de faces.
+
+Estruturas de prioridade devem utilizar heap/priority queue eficiente quando necessário.
+
+==================================================
+30. ARQUITETURA
+==================================================
+
+Separar claramente:
+
+/components
+/ui
+/viewport
+/importers
+/mesh
+/optimization
+/exporters
+/workers
+/utils
+/validation
+
+Criar módulos independentes:
+
+MeshImporter
+MeshAnalyzer
+MeshSimplifier
+MeshValidator
+STLExporter
+ProcessingWorker
+MemoryManager
+
+Evitar código monolítico.
+
+==================================================
+31. LOG TÉCNICO
+==================================================
+
+Durante o processamento, registrar internamente:
+
+Arquivo
+Formato
+Faces originais
+Vértices originais
+Bounding box
+Target
+Faces finais
+Vértices finais
+Percentual de redução
+Tempo de importação
+Tempo de análise
+Tempo de simplificação
+Tempo de exportação
+Erros
+Warnings
+
+Isso deve facilitar debugging e manutenção.
+
+==================================================
+32. REQUISITO CRÍTICO — NÃO ALTERAR O ORIGINAL
+==================================================
+
+O arquivo original nunca deve ser sobrescrito.
+
+Fluxo:
+
+ORIGINAL
+↓
+IMPORT
+↓
+COPY/INTERNAL REPRESENTATION
+↓
+OPTIMIZATION
+↓
+VALIDATION
+↓
+STL
+
+Se ocorrer qualquer erro:
+
+ORIGINAL permanece intacto.
+
+==================================================
+33. RESULTADO ESPERADO
+==================================================
+
+Exemplo de funcionamento:
+
+Usuário carrega:
+
+modelo.glb
+
+Sistema identifica:
+
+Formato: GLB
+Faces: 2.000.000
+Vértices: 1.050.000
+
+Usuário define:
+
+Target:
+200.000 faces
+
+Sistema processa:
+
+Análise
+↓
+Simplificação QEM
+↓
+Preservação de bordas
+↓
+Preservação de silhueta
+↓
+Preservação de detalhes
+↓
+Validação
+
+Resultado:
+
+Faces:
+198.700
+
+Redução:
+90,06%
+
+Exportação:
+
+modelo_reduzido.stl
+
+STL:
+
+BINÁRIO
+
+Validação:
+
+✓ Arquivo válido
+✓ 198.700 triângulos
+✓ Dentro do limite de 200.000
+✓ Geometria válida
+
+==================================================
+34. REGRA DE QUALIDADE
+==================================================
+
+NÃO afirmar que a redução mantém "100% da qualidade original".
+
+Implementar o sistema para:
+
+"Preservar o máximo possível da geometria original dentro do limite de faces definido."
+
+A qualidade deve ser determinada pela menor diferença geométrica possível.
+
+Quando possível, calcular métricas de erro como:
+
+Hausdorff distance
+Chamfer distance
+Quadric error
+
+Usar essas métricas para melhorar a simplificação.
+
+==================================================
+35. TESTES OBRIGATÓRIOS
+==================================================
+
+Criar testes com:
+
+- STL pequeno
+- STL grande
+- OBJ
+- PLY
+- GLB
+- GLTF
+- 10.000 faces
+- 100.000 faces
+- 500.000 faces
+- 1.000.000 faces
+- 2.000.000 faces
+- modelos com múltiplas partes
+- modelos com bordas
+- modelos com superfícies curvas
+- modelos com problemas de topologia
+
+Testar principalmente:
+
+2.000.000 → <= 200.000 faces
+
+Garantir que o resultado nunca ultrapasse o target.
+
+==================================================
+36. EXPERIÊNCIA DO USUÁRIO
+==================================================
+
+A interface deve parecer uma ferramenta profissional de software 3D.
+
+Evitar excesso de elementos.
+
+Usar:
+
+- dark UI
+- orange accent
+- cards discretos
+- tipografia limpa
+- ícones simples
+- animações pequenas
+- feedback visual imediato
+
+O botão principal deve ser claramente identificado.
+
+Exemplo:
+
+[ OPTIMIZE MODEL ]
+
+Após conclusão:
+
+[ EXPORT STL ]
+
+==================================================
+37. REGRA FINAL
+==================================================
+
+Não entregar uma implementação simplificada ou apenas visual.
+
+Implementar o processamento REAL da malha.
+
+Não simular redução.
+
+Não alterar apenas o contador de faces.
+
+Não criar um STL falso.
+
+A quantidade de triângulos exibida na interface deve corresponder à quantidade real de triângulos da malha.
+
+A exportação STL deve conter exatamente a geometria processada.
+
+O sistema deve ser capaz de:
+
+CARREGAR
+↓
+ANALISAR
+↓
+REDUZIR
+↓
+VALIDAR
+↓
+CONVERTER
+↓
+EXPORTAR
+
+de forma real e confiável.
+
+Prioridades absolutas:
+
+1. Integridade geométrica
+2. Qualidade da simplificação
+3. Limite máximo de faces
+4. STL válido
+5. Performance
+6. Baixo consumo de memória
+7. Interface fluida
+8. Experiência profissional
+
+Antes de finalizar a implementação, revisar toda a arquitetura procurando:
+
+- gargalos
+- memory leaks
+- operações bloqueantes
+- duplicação de buffers
+- erros de escala
+- problemas de indexação
+- problemas de normais
+- arquivos STL inválidos
+- targets incorretos
+- falhas em modelos grandes
+
+O resultado deve ser um módulo de redução de malhas 3D profissional, preparado para produção e integrado à aplicação existente.

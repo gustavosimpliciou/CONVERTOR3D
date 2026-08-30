@@ -1,0 +1,357 @@
+# CORREÇÃO OBRIGATÓRIA PARA DEPLOY NO NETLIFY
+
+Você é um engenheiro sênior especializado em deploy de aplicações web no Netlify.
+
+Sua tarefa é analisar TODO o projeto antes de realizar qualquer alteração e corrigir preventivamente qualquer problema que possa causar falha no Build ou Deploy no Netlify.
+
+## OBJETIVO PRINCIPAL
+
+O projeto deve estar 100% preparado para:
+
+1. Instalar todas as dependências corretamente.
+2. Executar o comando de build sem erros.
+3. Gerar corretamente a pasta final de produção.
+4. Ser publicado corretamente no Netlify.
+5. Funcionar corretamente após atualizar ou acessar diretamente qualquer rota.
+6. Não depender de configurações locais que não existem no ambiente de produção.
+
+NÃO considere o trabalho concluído apenas porque o código parece correto.
+
+Você DEVE validar a estrutura completa do projeto como se fosse executar o deploy real no Netlify.
+
+---
+
+# ETAPA 1 — ANALISAR A ESTRUTURA
+
+Antes de modificar qualquer arquivo:
+
+* Analise toda a estrutura de pastas.
+* Identifique qual framework está sendo utilizado.
+* Verifique o `package.json`.
+* Identifique o gerenciador de pacotes correto.
+* Verifique scripts disponíveis.
+* Verifique dependências e devDependencies.
+* Verifique se existem dependências ausentes.
+* Verifique imports quebrados.
+* Verifique arquivos referenciados que não existem.
+* Verifique diferenças entre letras maiúsculas e minúsculas nos nomes dos arquivos.
+
+IMPORTANTE:
+
+O ambiente Linux utilizado no Netlify diferencia:
+
+`Component.jsx`
+
+de:
+
+`component.jsx`
+
+Portanto, todos os imports devem ter exatamente o mesmo nome e capitalização do arquivo real.
+
+Corrija qualquer incompatibilidade de maiúsculas/minúsculas.
+
+---
+
+# ETAPA 2 — PACKAGE.JSON
+
+Verifique se o `package.json` possui scripts válidos.
+
+Garanta que exista um script de build funcional.
+
+Exemplo esperado:
+
+```json
+{
+  "scripts": {
+    "dev": "...",
+    "build": "...",
+    "start": "..."
+  }
+}
+```
+
+NÃO deixe scripts apontando para ferramentas inexistentes.
+
+NÃO utilize comandos que funcionam apenas localmente.
+
+NÃO dependa de pacotes instalados globalmente.
+
+Todas as ferramentas utilizadas pelo build devem existir nas dependências do projeto.
+
+---
+
+# ETAPA 3 — TESTAR O BUILD
+
+Antes de considerar o projeto pronto:
+
+1. Instale as dependências.
+2. Execute o build real.
+3. Corrija todos os erros.
+4. Execute novamente.
+5. Repita até que o build finalize sem nenhum erro crítico.
+
+O projeto só pode ser considerado pronto quando o equivalente a:
+
+```bash
+npm install
+npm run build
+```
+
+for executado com sucesso.
+
+NÃO ignore warnings que possam se transformar em erros de produção.
+
+NÃO esconda erros utilizando configurações que simplesmente ignoram falhas.
+
+Corrija a causa real.
+
+---
+
+# ETAPA 4 — CONFIGURAÇÃO DO NETLIFY
+
+Crie ou corrija o arquivo:
+
+`netlify.toml`
+
+na raiz correta do projeto.
+
+A configuração deve corresponder exatamente ao framework utilizado.
+
+Exemplo genérico:
+
+```toml
+[build]
+  command = "npm run build"
+  publish = "PASTA_DE_BUILD"
+```
+
+IMPORTANTE:
+
+Identifique automaticamente a pasta real gerada pelo build.
+
+Exemplos possíveis:
+
+* Vite → `dist`
+* Create React App → `build`
+* Outros frameworks → verificar documentação e configuração real do projeto.
+
+NUNCA configure a pasta publish sem verificar se ela realmente existe após o build.
+
+---
+
+# ETAPA 5 — DIRETÓRIO BASE
+
+Verifique se o projeto está:
+
+* Na raiz do repositório.
+* Dentro de uma subpasta.
+* Dentro de um monorepo.
+
+Se estiver dentro de uma subpasta, configure corretamente o diretório base.
+
+NÃO permita que o Netlify execute o build na pasta errada.
+
+Verifique:
+
+* localização do package.json
+* localização do netlify.toml
+* localização do código fonte
+* localização da pasta gerada pelo build
+
+Todas essas configurações devem ser coerentes entre si.
+
+---
+
+# ETAPA 6 — VARIÁVEIS DE AMBIENTE
+
+Procure no código por:
+
+* process.env
+* import.meta.env
+* variáveis de API
+* tokens
+* URLs externas
+* chaves de serviços
+
+Identifique todas as variáveis necessárias.
+
+NÃO coloque chaves secretas diretamente no frontend.
+
+Crie uma lista clara das variáveis necessárias para o ambiente Netlify.
+
+O projeto não pode quebrar silenciosamente caso uma variável esteja ausente.
+
+Sempre que possível:
+
+* validar variáveis obrigatórias;
+* fornecer fallback seguro;
+* impedir erros de build causados por valores undefined.
+
+---
+
+# ETAPA 7 — IMPORTS E DEPENDÊNCIAS
+
+Verifique automaticamente:
+
+* imports inexistentes;
+* extensões erradas;
+* caminhos relativos incorretos;
+* aliases não configurados;
+* dependências não instaladas;
+* pacotes importados mas ausentes do package.json;
+* bibliotecas incompatíveis com o ambiente de produção.
+
+Corrija todos os problemas.
+
+Nenhum import pode depender de comportamento exclusivo do sistema operacional local.
+
+---
+
+# ETAPA 8 — ROTAS E SPA
+
+Se o projeto for uma SPA utilizando React Router ou tecnologia semelhante:
+
+Configure o Netlify para que acessos diretos às rotas funcionem.
+
+Exemplo:
+
+```toml
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+```
+
+IMPORTANTE:
+
+Só utilize esta configuração quando apropriado para o framework.
+
+Não aplique cegamente em projetos SSR ou frameworks que possuem roteamento próprio.
+
+Identifique primeiro a arquitetura do projeto.
+
+---
+
+# ETAPA 9 — SERVERLESS FUNCTIONS
+
+Caso existam funções backend:
+
+* Verifique se estão em diretórios compatíveis com Netlify Functions.
+* Verifique imports.
+* Verifique dependências.
+* Verifique variáveis de ambiente.
+* Verifique se código Node.js não está sendo executado diretamente no navegador.
+* Verifique se APIs de browser não estão sendo utilizadas dentro do backend.
+
+Separe corretamente:
+
+FRONTEND
+
+e
+
+BACKEND / FUNCTIONS.
+
+---
+
+# ETAPA 10 — PROBLEMAS COM SSR
+
+Caso o framework utilize SSR:
+
+Verifique se componentes acessam diretamente:
+
+* window
+* document
+* localStorage
+* sessionStorage
+* navigator
+
+durante renderização no servidor.
+
+Essas APIs devem ser utilizadas apenas quando o ambiente do navegador estiver disponível.
+
+Corrija qualquer código que possa causar:
+
+`window is not defined`
+
+ou:
+
+`document is not defined`
+
+ou erros semelhantes durante o build/deploy.
+
+---
+
+# ETAPA 11 — VERIFICAÇÃO DE PRODUÇÃO
+
+Antes de finalizar:
+
+* Execute o build.
+* Confirme que a pasta de produção foi criada.
+* Verifique se index.html existe na pasta publicada quando aplicável.
+* Verifique assets.
+* Verifique JavaScript.
+* Verifique CSS.
+* Verifique imagens.
+* Verifique caminhos absolutos e relativos.
+* Verifique rotas.
+* Verifique variáveis de ambiente.
+
+NÃO deixe referências para:
+
+`localhost`
+
+no código de produção.
+
+---
+
+# ETAPA 12 — REGRA FUNDAMENTAL
+
+NÃO faça alterações aleatórias.
+
+NÃO reescreva funcionalidades que já funcionam.
+
+NÃO altere o design sem necessidade.
+
+NÃO remova recursos apenas para fazer o build passar.
+
+NÃO desative verificações para esconder erros.
+
+Corrija sempre a causa real do problema.
+
+Preserve:
+
+* funcionalidades existentes;
+* design;
+* componentes;
+* lógica;
+* comportamento da aplicação.
+
+---
+
+# RESULTADO OBRIGATÓRIO
+
+Antes de finalizar, forneça um relatório contendo:
+
+## 1. Framework identificado
+
+## 2. Gerenciador de pacotes utilizado
+
+## 3. Comando de build correto
+
+## 4. Pasta correta de publicação
+
+## 5. Configuração final do netlify.toml
+
+## 6. Variáveis de ambiente necessárias
+
+## 7. Problemas encontrados
+
+## 8. Problemas corrigidos
+
+## 9. Confirmação de que o build foi executado com sucesso
+
+## 10. Confirmação de que o projeto está pronto para deploy no Netlify
+
+REGRA FINAL:
+
+NÃO DIGA QUE O PROJETO ESTÁ PRONTO PARA DEPLOY SEM PRIMEIRO VALIDAR O BUILD E CONFIRMAR QUE A CONFIGURAÇÃO DE BUILD E A PASTA DE PUBLICAÇÃO SÃO COMPATÍVEIS COM A ESTRUTURA REAL DO PROJETO.

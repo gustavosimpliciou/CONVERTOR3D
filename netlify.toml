@@ -1,0 +1,11 @@
+[build]
+  command = "pnpm run build:netlify"
+  publish = "artifacts/redutor-3d/dist/public"
+
+[build.environment]
+  NODE_VERSION = "24"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
