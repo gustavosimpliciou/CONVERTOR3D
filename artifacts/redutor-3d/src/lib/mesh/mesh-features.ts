@@ -117,7 +117,7 @@ export function computeMeshFeaturesFull(mesh: { positions: Float32Array; indices
   }
 
   // Compute vertex normals (area-weighted)
-  const vertexNormals = new Float32Array(positions.length);
+  // vertexNormals already declared at line 80; vertexNormalCounts initialized below
   const vertexNormalCounts = new Uint32Array(positions.length / 3);
 
   for (let i = 0; i < indices.length / 3; i++) {
