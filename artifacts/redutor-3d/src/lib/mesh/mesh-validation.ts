@@ -9,14 +9,6 @@ const MAX_VOLUME_CHANGE_PERCENT = 5;
 const MAX_HAUSDORFF_DISTANCE = 0.01;
 const MAX_SILHOUETTE_DEVIATION = 0.05;
 
-const MIN_TRIANGLE_AREA = 1e-12;
-const MIN_ANGLE_DEGREES = 5;
-const MAX_ASPECT_RATIO = 50;
-const MAX_NORMAL_DEVIATION = 0.5;
-const MAX_VOLUME_CHANGE_PERCENT = 5;
-const MAX_HAUSDORFF_DISTANCE = 0.01;
-const MAX_SILHOUETTE_DEVIATION = 0.05;
-
 export function validateMeshGeometry(mesh: any, originalMesh: any, config: any): any {
   const { positions, indices } = mesh;
   const originalPositions = originalMesh.positions;
@@ -96,8 +88,6 @@ export function validateMeshGeometry(mesh: any, originalMesh: any, config: any):
   }
   
   // Check for inverted normals
-  let invertedNormals = 0;
-  const faceNormals: [number, number, number][] = [];
   for (let i = 0; i < indices.length / 3; i++) {
     const normal = triangleNormal(
       new Float32Array([0,0,0]), 
@@ -116,29 +106,32 @@ export function validateMeshGeometry(mesh: any, originalMesh: any, config: any):
   const volumeChangePercent = originalVolume > 0 ? 
     Math.abs(computeSignedVolume(mesh.positions, mesh.indices) - originalVolume) / originalVolume * 100 : 0;
   
-  // Compute Hausdorff distance (simplified)
-  const hausdorffDistance = computeHausdorffDistance(mesh.positions, originalMesh.positions);
-  
   // Check silhouette deviation
   const silhouetteDeviation = computeSilhouetteDeviation(mesh, originalMesh);
+  if (silhouetteDeviation > 0.05) {
+    warnings.push(`Desvio de silhueta: ${silhouetteDeviation.toFixed(4)}`);
+  }
   
   // Self-intersection check
   const selfIntersections = detectSelfIntersections(mesh);
+  if (selfIntersections > 0) {
+    errors.push(`${selfIntersections} auto-interseções detectadas`);
+  }
   
   return {
     passed: errors.length === 0,
     errors,
     warnings,
     metrics: {
-      hausdorffDistance: hausdorffDistance,
+      hausdorffDistance: computeHausdorffDistance(mesh.positions, originalMesh.positions),
       volumeChangePercent: volumeChangePercent,
       maxAspectRatio: maxAspectRatio,
       minTriangleArea: minTriangleArea,
       minAngle: minAngle,
       normalDeviation: 0,
       volumeChangePercent: volumeChangePercent,
-      silhouetteDeviation: silhouetteDeviation,
-      selfIntersections: selfIntersections
+      silhouetteDeviation: computeSilhouetteDeviation(mesh, originalMesh),
+      selfIntersections: detectSelfIntersections(mesh)
     }
   };
 }
