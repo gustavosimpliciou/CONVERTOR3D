@@ -1,4 +1,11 @@
-import { calculateBounds, compactMesh, triangleAreaSquared } from './geometry';
+import { 
+  calculateBounds, 
+  compactMesh, 
+  triangleAreaSquared, 
+  triangleNormal, 
+  computeSignedVolume, 
+  computeHausdorffDistance 
+} from './geometry';
 import type { MeshData, SimplifyOptions, SimplifyResult, MeshFeatures, EdgeCollapseCandidate, ValidationConfig } from './mesh-types';
 
 type Quadric = [number, number, number, number, number, number, number, number, number, number];
@@ -268,66 +275,7 @@ function computeHausdorffDistance(positions1: Float32Array, indices1: Uint32Arra
   
   return maxDist;
 }
-
-function triangleNormal(positions: Float32Array, a: number, b: number, c: number): [number, number, number] {
-  const ax = positions[a * 3], ay = positions[a * 3 + 1], az = positions[a * 3 + 2];
-  const bx = positions[b * 3], by = positions[b * 3 + 1], bz = positions[b * 3 + 2];
-  const cx = positions[c * 3], cy = positions[c * 3 + 1], cz = positions[c * 3 + 2];
-  const abx = positions[b * 3] - positions[a * 3], aby = positions[b * 3 + 1] - positions[a * 3 + 1], abz = positions[b * 3 + 2] - positions[a * 3 + 2];
-  const acx = positions[c * 3] - positions[a * 3], acy = positions[c * 3 + 1] - positions[a * 3 + 1], acz = positions[c * 3 + 2] - positions[a * 3 + 2];
-  return [
-    positions[b * 3 + 1] * positions[c * 3 + 2] - positions[b * 3 + 2] * positions[c * 3 + 1] - 
-    positions[a * 3 + 1] * (positions[c * 3 + 2] - positions[b * 3 + 2]) + 
-    positions[a * 3 + 2] * (positions[c * 3 + 1] - positions[b * 3 + 1]),
-    positions[b * 3 + 2] * positions[c * 3] - positions[b * 3] * positions[c * 3 + 2] - 
-    positions[a * 3 + 2] * (positions[c * 3] - positions[b * 3]) + 
-    positions[a * 3] * (positions[c * 3 + 2] - positions[b * 3 + 2]),
-    positions[b * 3] * positions[c * 3 + 1] - positions[b * 3 + 1] * positions[c * 3] - 
-    positions[a * 3] * (positions[c * 3 + 1] - positions[b * 3 + 1]) + 
-    positions[a * 3 + 1] * (positions[c * 3] - positions[b * 3])
-  ];
-}
-
-function computeSignedVolume(positions: Float32Array, indices: Uint32Array): number {
-  let volume = 0;
-  for (let i = 0; i < indices.length / 3; i++) {
-    const a = indices[i * 3];
-    const b = indices[i * 3 + 1];
-    const c = indices[i * 3 + 2];
-    
-    const ax = positions[a * 3], ay = positions[a * 3 + 1], az = positions[a * 3 + 2];
-    const bx = positions[b * 3], by = positions[b * 3 + 1], bz = positions[b * 3 + 2];
-    const cx = positions[c * 3], cy = positions[c * 3 + 1], cz = positions[c * 3 + 2];
-    
-    volume += ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx);
-  }
-  return volume / 6;
-}
-
-function computeHausdorffDistance(positions1: Float32Array, indices1: Uint32Array, positions2: Float32Array, indices2: Uint32Array): number {
-  // Simplified - sample vertices from mesh1 and find closest on mesh2
-  let maxDist = 0;
-  const step = Math.max(1, Math.floor(positions1.length / 3 / 1000));
-  
-  for (let i = 0; i < positions1.length / 3; i += step) {
-    const p1x = positions1[i * 3];
-    const p1y = positions1[i * 3 + 1];
-    const p1z = positions1[i * 3 + 2];
-    
-    let minDist = Infinity;
-    for (let j = 0; j < positions2.length / 3; j += 10) {
-      const dx = positions1[i * 3] - positions2[j * 3];
-      const dy = positions1[i * 3 + 1] - positions2[j * 3 + 1];
-      const dz = positions1[i * 3 + 2] - positions2[j * 3 + 2];
-      const dist = Math.hypot(dx, dy, dz);
-      if (dist < minDist) minDist = dist;
-    }
-    if (minDist > maxDist) maxDist = minDist;
-  }
-  
-  return maxDist;
-}
-
+ 
 export function robustSimplifyMesh(mesh: any, options: any, onProgress?: (progress: number) => void): any {
   // This is a placeholder for the full robust implementation
   // The actual implementation would be very long and complex

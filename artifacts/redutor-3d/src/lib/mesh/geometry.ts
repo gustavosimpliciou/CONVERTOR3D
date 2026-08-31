@@ -149,3 +149,52 @@ export function normalizeTriangles(
   }
   return compactMesh(positions, valid, format);
 }
+
+export function triangleNormal(positions: Float32Array, a: number, b: number, c: number): [number, number, number] {
+  const ax = positions[a * 3], ay = positions[a * 3 + 1], az = positions[a * 3 + 2];
+  const bx = positions[b * 3], by = positions[b * 3 + 1], bz = positions[b * 3 + 2];
+  const cx = positions[c * 3], cy = positions[c * 3 + 1], cz = positions[c * 3 + 2];
+  const abx = bx - ax, aby = by - ay, abz = bz - az;
+  const acx = cx - ax, acy = cy - ay, acz = cz - az;
+  const nx = aby * acz - abz * acy;
+  const ny = abz * acx - abx * acz;
+  const nz = abx * acy - aby * acx;
+  const len = Math.hypot(nx, ny, nz);
+  if (len > 1e-10) return [nx / len, ny / len, nz / len];
+  return [0, 0, 0];
+}
+
+export function computeSignedVolume(positions: Float32Array, indices: Uint32Array): number {
+  let volume = 0;
+  for (let i = 0; i < indices.length / 3; i++) {
+    const a = indices[i * 3];
+    const b = indices[i * 3 + 1];
+    const c = indices[i * 3 + 2];
+    
+    const ax = positions[a * 3], ay = positions[a * 3 + 1], az = positions[a * 3 + 2];
+    const bx = positions[b * 3], by = positions[b * 3 + 1], bz = positions[b * 3 + 2];
+    const cx = positions[c * 3], cy = positions[c * 3 + 1], cz = positions[c * 3 + 2];
+    
+    volume += ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx);
+  }
+  return volume / 6;
+}
+
+export function computeHausdorffDistance(positions1: Float32Array, positions2: Float32Array): number {
+  let maxDist = 0;
+  const step = Math.max(1, Math.floor(positions1.length / 3 / 1000));
+  
+  for (let i = 0; i < positions1.length / 3; i += step) {
+    let minDist = Infinity;
+    for (let j = 0; j < positions2.length / 3; j += 10) {
+      const dx = positions1[i * 3] - positions2[j * 3];
+      const dy = positions1[i * 3 + 1] - positions2[j * 3 + 1];
+      const dz = positions1[i * 3 + 2] - positions2[j * 3 + 2];
+      const dist = Math.hypot(dx, dy, dz);
+      if (dist < minDist) minDist = dist;
+    }
+    if (minDist > maxDist) maxDist = minDist;
+  }
+  
+  return maxDist;
+}
