@@ -1,7 +1,7 @@
 import { buildStats, calculateBounds, compactMesh } from './geometry';
 import { parseMesh } from './parser';
+import { simplifyMesh } from './simplifier';
 import { exportBinaryStl } from './stl';
-import { robustSimplifyMesh } from './mesh-simplifier-robust';
 import { taubinSmoothing } from './mesh-postprocess';
 import type { MeshData, WorkerFailure, WorkerProgress, WorkerRequest, WorkerSuccess } from './types';
 
@@ -19,8 +19,8 @@ self.onmessage = (event: MessageEvent<any>) => {
     const original = buildStats(mesh);
     post({ type: 'progress', phase: 'analyzing', progress: 0.15, message: 'Analisando geometria e detectando features…', stats: original });
     
-    // Use robust simplifier
-    const result = robustSimplifyMesh(mesh, {
+    // Use working simplifyMesh with robust options
+    const result = simplifyMesh(mesh, {
       targetTriangles: request.targetTriangles,
       quality: request.quality,
       preserveBorders: request.preserveBorders,
