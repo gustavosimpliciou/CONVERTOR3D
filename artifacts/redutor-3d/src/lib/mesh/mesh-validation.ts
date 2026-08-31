@@ -9,7 +9,7 @@ const MAX_VOLUME_CHANGE_PERCENT = 5;
 const MAX_HAUSDORFF_DISTANCE = 0.01;
 const MAX_SILHOUETTE_DEVIATION = 0.05;
 
-export function validateMeshGeometry(mesh: any, originalMesh: any, config: any): any {
+export function validateMesh(mesh: any, originalMesh: any, config: any): any {
   const { positions, indices } = mesh;
   const originalPositions = originalMesh.positions;
   const originalIndices = originalMesh.indices;
@@ -23,7 +23,6 @@ export function validateMeshGeometry(mesh: any, originalMesh: any, config: any):
   let degenerateFaces = 0;
   let thinTriangles = 0;
   let zeroAreaFaces = 0;
-  let invertedNormals = 0;
   let maxAspectRatio = 0;
   let minTriangleArea = Infinity;
   let minAngle = Infinity;
@@ -107,12 +106,12 @@ export function validateMeshGeometry(mesh: any, originalMesh: any, config: any):
     warnings,
     metrics: {
       hausdorffDistance: computeHausdorffDistance(mesh.positions, originalMesh.positions),
-      volumeChangePercent: volumeChangePercent,
-      maxAspectRatio: maxAspectRatio,
-      minTriangleArea: minTriangleArea,
-      minAngle: minAngle,
+      volumeChangePercent,
+      maxAspectRatio,
+      minTriangleArea,
+      minAngle,
       normalDeviation: 0,
-      volumeChangePercent: volumeChangePercent,
+      volumeChangePercent,
       silhouetteDeviation: computeSilhouetteDeviation(mesh, originalMesh),
       selfIntersections: detectSelfIntersections(mesh)
     }

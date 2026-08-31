@@ -3,7 +3,6 @@ import { validateMesh, cleanMesh } from './mesh-validation';
 import { computeMeshFeatures } from './mesh-features';
 import { robustSimplifyMesh } from './mesh-simplifier-robust';
 import { taubinSmoothing, reprojectToOriginalMesh, scaleToMatchVolume } from './mesh-postprocess';
-import { validateMeshGeometry } from './mesh-validation';
 import { buildStats, calculateBounds, compactMesh } from './geometry';
 
 export interface PipelineOptions {
