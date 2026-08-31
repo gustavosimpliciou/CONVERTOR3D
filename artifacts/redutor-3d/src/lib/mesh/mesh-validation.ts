@@ -123,9 +123,42 @@ export function cleanMesh(mesh: MeshData): MeshData {
   const vertexCount = positions.length / 3;
   const triangleCount = indices.length / 3;
 
+  // Step 1: Compute triangle areas and identify degenerate faces
+  const degenerateFaces = new Uint8Array(triangleCount);
+  
+  for (let i = 0; i < triangleCount; i++) {
+    const a = indices[i * 3];
+    const b = indices[i * 3 + 1];
+    const c = indices[i * 3 + 2];
+    
+    if (a === b || b === c || a === c) {
+      degenerateFaces[i] = 1;
+      continue;
+    }
+    
+    // Calculate area using cross product
+    const ax = positions[a * 3], ay = positions[a * 3 + 1], az = positions[a * 3 + 2];
+    const bx = positions[b * 3], by = positions[b * 3 + 1], bz = positions[b * 3 + 2];
+    const cx = positions[c * 3], cy = positions[c * 3 + 1], cz = positions[c * 3 + 2];
+    
+    const abx = bx - ax, aby = by - ay, abz = bz - az;
+    const acx = cx - ax, acy = cy - ay, acz = cz - az;
+    
+    const nx = aby * acz - abz * acy;
+    const ny = abz * acx - abx * acz;
+    const nz = abx * acy - aby * acx;
+    
+    const areaSq = nx * nx + ny * ny + nz * nz;
+    if (areaSq <= 1e-12) {
+      degenerateFaces[i] = 1;
+    }
+  }
+
+  // Step 2: Build vertex map, skipping degenerate faces
   const vertexMap = new Map<string, number>();
   const remap = new Uint32Array(positions.length / 3);
   const uniquePositions: number[] = [];
+  const validTriangleMap = new Map<number, number>(); // maps old tri index to new tri index
 
   for (let i = 0; i < vertexCount; i++) {
     const key = `${positions[i * 3].toFixed(6)},${positions[i * 3 + 1].toFixed(6)},${positions[i * 3 + 2].toFixed(6)}`;
@@ -138,14 +171,22 @@ export function cleanMesh(mesh: MeshData): MeshData {
     remap[i] = newIdx;
   }
 
+  // Step 3: Remap indices, skipping degenerate faces
   const newIndices: number[] = [];
+  let validTriangleCount = 0;
+  
   for (let i = 0; i < triangleCount; i++) {
+    if (degenerateFaces[i]) continue;
+    
     const a = remap[indices[i * 3]];
     const b = remap[indices[i * 3 + 1]];
     const c = remap[indices[i * 3 + 2]];
-
+    
+    // Skip if remapping resulted in degenerate triangle (coincident vertices)
     if (a !== b && b !== c && a !== c) {
       newIndices.push(a, b, c);
+      validTriangleMap.set(i, validTriangleCount);
+      validTriangleCount++;
     }
   }
 
@@ -156,7 +197,8 @@ export function cleanMesh(mesh: MeshData): MeshData {
     positions: newPositions,
     indices: newIndicesArray,
     format: mesh.format,
-    bounds: calculateBounds(new Float32Array(uniquePositions))
+    bounds: calculateBounds(new Float32Array(uniquePositions)),
+    degenerateFaceCount: triangleCount - validTriangleCount
   };
 }
 

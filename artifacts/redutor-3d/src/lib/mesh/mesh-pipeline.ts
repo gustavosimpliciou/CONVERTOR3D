@@ -59,7 +59,13 @@ export async function processMeshPipeline(
   }
   
   reportProgress('cleaning', 0.1, 'Limpando e reparando malha...');
-  let currentMesh = cleanMesh(mesh);
+  const cleanResult = cleanMesh(mesh);
+  let currentMesh: MeshData = {
+    positions: cleanResult.positions,
+    indices: cleanResult.indices,
+    format: cleanResult.format,
+    bounds: cleanResult.bounds
+  };
   
   // Recompute stats after cleaning
   const originalStats = buildStats(currentMesh);
