@@ -105,16 +105,58 @@ export function validateMesh(mesh: any, originalMesh: any, config: any): any {
     errors,
     warnings,
     metrics: {
-      hausdorffDistance: computeHausdorffDistance(mesh.positions, originalMesh.positions),
+      hausdorffDistance,
       volumeChangePercent,
       maxAspectRatio,
       minTriangleArea,
       minAngle,
       normalDeviation: 0,
-      volumeChangePercent,
       silhouetteDeviation: computeSilhouetteDeviation(mesh, originalMesh),
       selfIntersections: detectSelfIntersections(mesh)
     }
+  };
+}
+
+export function cleanMesh(mesh: MeshData): MeshData {
+  const positions = mesh.positions;
+  const indices = mesh.indices;
+  const vertexCount = positions.length / 3;
+  const triangleCount = indices.length / 3;
+
+  const vertexMap = new Map<string, number>();
+  const remap = new Uint32Array(positions.length / 3);
+  const uniquePositions: number[] = [];
+
+  for (let i = 0; i < vertexCount; i++) {
+    const key = `${positions[i * 3].toFixed(6)},${positions[i * 3 + 1].toFixed(6)},${positions[i * 3 + 2].toFixed(6)}`;
+    let newIdx = vertexMap.get(key);
+    if (newIdx === undefined) {
+      newIdx = uniquePositions.length / 3;
+      vertexMap.set(key, newIdx);
+      uniquePositions.push(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
+    }
+    remap[i] = newIdx;
+  }
+
+  const newIndices: number[] = [];
+  for (let i = 0; i < triangleCount; i++) {
+    const a = remap[indices[i * 3]];
+    const b = remap[indices[i * 3 + 1]];
+    const c = remap[indices[i * 3 + 2]];
+
+    if (a !== b && b !== c && a !== c) {
+      newIndices.push(a, b, c);
+    }
+  }
+
+  const newPositions = new Float32Array(uniquePositions);
+  const newIndicesArray = new Uint32Array(newIndices);
+
+  return {
+    positions: newPositions,
+    indices: newIndicesArray,
+    format: mesh.format,
+    bounds: calculateBounds(new Float32Array(uniquePositions))
   };
 }
 
