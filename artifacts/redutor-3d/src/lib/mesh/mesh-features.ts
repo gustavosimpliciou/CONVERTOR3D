@@ -83,7 +83,7 @@ export function computeMeshFeaturesFull(mesh: { positions: Float32Array; indices
 
   // Compute face normals and areas
   const faceNormalsArray: [number, number, number][] = [];
-  const faceAreas = new Float32Array(indices.length / 3);
+  const faceAreas: number[] = [];
 
   for (let i = 0; i < indices.length / 3; i++) {
     const a = indices[i * 3];
@@ -113,7 +113,7 @@ export function computeMeshFeaturesFull(mesh: { positions: Float32Array; indices
       faceNormals[i * 3 + 1] = 0;
       faceNormals[i * 3 + 2] = 0;
     }
-    faceAreas[i] = area;
+    faceAreas.push(area);
   }
 
   // Compute vertex normals (area-weighted)
