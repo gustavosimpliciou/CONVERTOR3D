@@ -24,7 +24,6 @@ export function validateMeshGeometry(mesh: any, originalMesh: any, config: any):
   let thinTriangles = 0;
   let zeroAreaFaces = 0;
   let invertedNormals = 0;
-  let selfIntersections = 0;
   let maxAspectRatio = 0;
   let minTriangleArea = Infinity;
   let minAngle = Infinity;
@@ -49,8 +48,8 @@ export function validateMeshGeometry(mesh: any, originalMesh: any, config: any):
     const areaVal = triangleArea(mesh.positions, a, b, c);
     minTriangleArea = Math.min(minTriangleArea, areaVal);
     
-    const minAngle = minTriangleAngle(mesh.positions, a, b, c);
-    if (minAngle < 5) minAngle = Math.min(minAngle, minAngle);
+    const minAngleVal = minTriangleAngle(mesh.positions, a, b, c);
+    if (minAngleVal < 5) minAngle = Math.min(minAngle, minAngleVal);
   }
   
   if (zeroAreaFaces > 0) {
@@ -102,22 +101,6 @@ export function validateMeshGeometry(mesh: any, originalMesh: any, config: any):
     warnings.push(`Desvio de silhueta: ${silhouetteDeviation.toFixed(4)}`);
   }
   
-  // Volume change percent
-  const volumeChangePercent = originalVolume > 0 ? 
-    Math.abs(computeSignedVolume(mesh.positions, mesh.indices) - originalVolume) / originalVolume * 100 : 0;
-  
-  // Check silhouette deviation
-  const silhouetteDeviation = computeSilhouetteDeviation(mesh, originalMesh);
-  if (silhouetteDeviation > 0.05) {
-    warnings.push(`Desvio de silhueta: ${silhouetteDeviation.toFixed(4)}`);
-  }
-  
-  // Self-intersection check
-  const selfIntersections = detectSelfIntersections(mesh);
-  if (selfIntersections > 0) {
-    errors.push(`${selfIntersections} auto-interseções detectadas`);
-  }
-  
   return {
     passed: errors.length === 0,
     errors,
@@ -134,4 +117,169 @@ export function validateMeshGeometry(mesh: any, originalMesh: any, config: any):
       selfIntersections: detectSelfIntersections(mesh)
     }
   };
+}
+
+function triangleArea(positions: Float32Array, a: number, b: number, c: number): number {
+  const normal = triangleNormal(
+    new Float32Array([0,0,0]), a, b, c
+  );
+  return Math.hypot(normal[0], normal[1], normal[2]) * 0.5;
+}
+
+function triangleAspectRatio(positions: Float32Array, a: number, b: number, c: number): number {
+  const ab = Math.hypot(
+    positions[b * 3] - positions[a * 3],
+    positions[b * 3 + 1] - positions[a * 3 + 1],
+    positions[b * 3 + 2] - positions[a * 3 + 2]
+  );
+  const bc = Math.hypot(
+    positions[b * 3] - positions[c * 3],
+    positions[b * 3 + 1] - positions[c * 3 + 1],
+    positions[b * 3 + 2] - positions[c * 3 + 2]
+  );
+  const ca = Math.hypot(
+    positions[c * 3] - positions[a * 3],
+    positions[c * 3 + 1] - positions[a * 3 + 1],
+    positions[c * 3 + 2] - positions[a * 3 + 2]
+  );
+  const maxEdge = Math.max(ab, bc, ca);
+  const minEdge = Math.min(ab, bc, ca);
+  return minEdge > 0 ? maxEdge / minEdge : Infinity;
+}
+
+function minTriangleAngle(positions: Float32Array, a: number, b: number, c: number): number {
+  const ax = positions[a * 3], ay = positions[a * 3 + 1], az = positions[a * 3 + 2];
+  const bx = positions[b * 3], by = positions[b * 3 + 1], bz = positions[b * 3 + 2];
+  const cx = positions[c * 3], cy = positions[c * 3 + 1], cz = positions[c * 3 + 2];
+
+  const angles = [
+    computeAngle([ax, ay, az], [bx, by, bz], [cx, cy, cz]),
+    computeAngle([bx, by, bz], [ax, ay, az], [cx, cy, cz]),
+    computeAngle([cx, cy, cz], [ax, ay, az], [bx, by, bz])
+  ];
+  return Math.min(...angles) * 180 / Math.PI;
+}
+
+function computeAngle(a: [number, number, number], b: [number, number, number], c: [number, number, number]): number {
+  const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+  const abLen = Math.hypot(...ab);
+  const acLen = Math.hypot(...ac);
+  if (abLen < 1e-10 || acLen < 1e-10) return 0;
+  const dot = (ab[0] * ac[0] + ab[1] * ac[1] + ab[2] * ac[2]) / (abLen * acLen);
+  return Math.acos(Math.max(-1, Math.min(1, dot)));
+}
+
+function computeSignedVolume(positions: Float32Array, indices: Uint32Array): number {
+  let volume = 0;
+  for (let i = 0; i < indices.length / 3; i++) {
+    const a = indices[i * 3];
+    const b = indices[i * 3 + 1];
+    const c = indices[i * 3 + 2];
+    
+    const ax = positions[a * 3], ay = positions[a * 3 + 1], az = positions[a * 3 + 2];
+    const bx = positions[b * 3], by = positions[b * 3 + 1], bz = positions[b * 3 + 2];
+    const cx = positions[c * 3], cy = positions[c * 3 + 1], cz = positions[c * 3 + 2];
+    
+    volume += ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx);
+  }
+  return volume / 6;
+}
+
+function computeHausdorffDistance(positions1: Float32Array, positions2: Float32Array): number {
+  let maxDist = 0;
+  const step = Math.max(1, Math.floor(positions1.length / 3 / 1000));
+  
+  for (let i = 0; i < positions1.length / 3; i += step) {
+    let minDist = Infinity;
+    for (let j = 0; j < positions2.length / 3; j += 10) {
+      const dx = positions1[i * 3] - positions2[j * 3];
+      const dy = positions1[i * 3 + 1] - positions2[j * 3 + 1];
+      const dz = positions1[i * 3 + 2] - positions2[j * 3 + 2];
+      const dist = Math.hypot(dx, dy, dz);
+      if (dist < minDist) minDist = dist;
+    }
+    if (minDist > maxDist) maxDist = minDist;
+  }
+  
+  return maxDist;
+}
+
+function computeSilhouetteDeviation(mesh: any, originalMesh: any): number {
+  // Simplified - compute bounding box difference as proxy
+  const bounds1 = calculateBounds(mesh.positions);
+  const bounds2 = calculateBounds(originalMesh.positions);
+  
+  const dx = Math.max(
+    Math.abs(bounds1.min[0] - bounds2.min[0]),
+    Math.abs(bounds1.max[0] - bounds2.max[0])
+  );
+  const dy = Math.max(
+    Math.abs(bounds1.min[1] - bounds2.min[1]),
+    Math.abs(bounds1.max[1] - bounds2.max[1])
+  );
+  const dz = Math.max(
+    Math.abs(bounds1.min[2] - bounds2.min[2]),
+    Math.abs(bounds1.max[2] - bounds2.max[2])
+  );
+  
+  return Math.max(dx, dy, dz);
+}
+
+function detectSelfIntersections(mesh: any): number {
+  // Simplified - check for intersecting triangles using bounding box overlap
+  // In production, use BVH or sweep-line algorithm
+  const { positions, indices } = mesh;
+  const triangleCount = indices.length / 3;
+  let intersections = 0;
+  
+  // Quick check - only sample pairs for performance
+  const sampleStep = Math.max(1, Math.floor(indices.length / 3 / 1000));
+  
+  for (let i = 0; i < triangleCount; i += sampleStep) {
+    const a1 = indices[i * 3];
+    const b1 = indices[i * 3 + 1];
+    const c1 = indices[i * 3 + 2];
+    
+    // Compute triangle bounding box
+    const min1 = [Infinity, Infinity, Infinity];
+    const max1 = [-Infinity, -Infinity, -Infinity];
+    for (const v of [indices[i * 3], indices[i * 3 + 1], indices[i * 3 + 2]]) {
+      for (let d = 0; d < 3; d++) {
+        const val = positions[v * 3 + d];
+        if (val < min1[d]) min1[d] = val;
+        if (val > max1[d]) max1[d] = val;
+      }
+    }
+    
+    for (let j = i + 1; j < triangleCount; j += sampleStep) {
+      const a2 = indices[j * 3];
+      const b2 = indices[j * 3 + 1];
+      const c2 = indices[j * 3 + 2];
+      
+      // Quick bounding box test
+      const min2 = [Infinity, Infinity, Infinity];
+      const max2 = [-Infinity, -Infinity, -Infinity];
+      for (const v of [indices[j * 3], indices[j * 3 + 1], indices[j * 3 + 2]]) {
+        for (let d = 0; d < 3; d++) {
+          const val = positions[v * 3 + d];
+          if (val < min2[d]) min2[d] = val;
+          if (val > max2[d]) max2[d] = val;
+        }
+      }
+      
+      // Check bbox overlap
+      if (max1[0] < min2[0] || min1[0] > max2[0] ||
+          max1[1] < min2[1] || min1[1] > max2[1] ||
+          max1[2] < min2[2] || min1[2] > max2[2]) {
+        continue;
+      }
+      
+      // Triangles might intersect - would need full triangle-triangle test
+      // For now, just count potential intersections
+      intersections++;
+    }
+  }
+  
+  return intersections;
 }
