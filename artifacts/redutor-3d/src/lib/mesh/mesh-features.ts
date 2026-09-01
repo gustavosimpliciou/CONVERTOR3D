@@ -364,7 +364,7 @@ export function detectMeshFeatures(mesh: MeshData) {
     importance += Math.abs(meanCurvature[v]) * 5;
     if (featureVertices.has(v)) importance += 100;
     if (boundaryVertices.has(v)) importance += 50;
-    importance = Math.min(1, importance / 100);
+    vertexImportance[v] = Math.min(1, importance / 100);
   }
 
   // Detect silhouette edges from a set of view directions
@@ -445,8 +445,9 @@ export function detectMeshFeatures(mesh: MeshData) {
         prev = current;
         current = next;
       }
-      if (loop.length > 2) boundaryLoops.push(loop);
     }
+    if (loop.length > 2) boundaryLoops.push(loop);
+  }
 
   // Silhouette loops (similar)
   const silhouetteLoops: number[][] = [];
@@ -472,15 +473,6 @@ export function detectMeshFeatures(mesh: MeshData) {
     if (loop.length > 2) silhouetteLoops.push(loop);
   }
 
-  // Compute vertex importance
-  const vertexImportance = new Float32Array(vertexCount);
-  for (let v = 0; v < vertexCount; v++) {
-    let importance = 0;
-    importance += Math.abs(gaussianCurvature[v]) * 10;
-    importance += Math.abs(meanCurvature[v]) * 5;
-    // Add feature weights
-  }
-
   // Normalize importance
   let maxImp = 0;
   for (let i = 0; i < vertexCount; i++) {
@@ -493,21 +485,21 @@ export function detectMeshFeatures(mesh: MeshData) {
   }
 
   return {
-    boundaryVertices: new Set(boundaryVerticesArray),
-    boundaryEdges: new Set(),
-    silhouetteVertices: new Set(silhouetteVerticesArray),
-    silhouetteEdges: new Set(),
-    featureVertices: new Set(),
-    featureEdges: new Set(),
-    cornerVertices: new Set(),
-    curvature: new Float32Array(vertexCount),
+    boundaryVertices,
+    boundaryEdges,
+    silhouetteVertices,
+    silhouetteEdges,
+    featureVertices,
+    featureEdges,
+    cornerVertices: new Set<number>(),
+    curvature,
     gaussianCurvature,
     meanCurvature,
-    vertexImportance: new Float32Array(vertexCount),
-    boundaryLoops: [],
-    silhouetteLoops: [],
-    boundaryVerticesArray: [],
-    silhouetteVerticesArray: []
+    vertexImportance,
+    boundaryLoops,
+    silhouetteLoops,
+    boundaryVerticesArray,
+    silhouetteVerticesArray
   };
 }
 

@@ -81,7 +81,13 @@ export function robustSimplifyMesh(mesh: MeshData, options: SimplifyOptions, onP
   // Step 4: Build edge collapse priority queue
   // Use a cost that combines: low degree (prefer), boundary avoidance, feature preservation
   const edgeCosts = new Map<string, number>();
-  
+
+  // Compute mesh features ONCE up front. Detecting features is O(triangles),
+  // so calling it inside the per-edge loop made the whole pass O(triangles^2)
+  // and froze the tool on real models. Hoisting it keeps the result identical
+  // while making simplification dramatically faster.
+  const features = detectMeshFeatures({ positions: currentPositions, indices: currentIndices });
+
   for (let i = 0; i < currentTriangleCount; i++) {
     const a = currentIndices[i * 3];
     const b = currentIndices[i * 3 + 1];
@@ -95,7 +101,6 @@ export function robustSimplifyMesh(mesh: MeshData, options: SimplifyOptions, onP
       const degreeCost = vertexDegree[u] + vertexDegree[v];
       
       // Boundary penalty
-      const features = detectMeshFeatures({ positions: currentPositions, indices: currentIndices });
       const isBoundaryU = features.boundaryVertices.has(u);
       const isBoundaryV = features.boundaryVertices.has(v);
       
