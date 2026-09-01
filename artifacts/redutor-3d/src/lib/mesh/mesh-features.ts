@@ -79,7 +79,6 @@ export function computeMeshFeaturesFull(mesh: { positions: Float32Array; indices
 
   const vertexNormals = new Float32Array(positions.length);
   const faceNormals = new Float32Array((indices.length / 3) * 3);
-  const faceAreas = new Float32Array(indices.length / 3);
 
   // Compute face normals and areas
   const faceNormalsArray: [number, number, number][] = [];
