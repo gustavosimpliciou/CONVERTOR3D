@@ -511,7 +511,7 @@ export function detectMeshFeatures(mesh: MeshData) {
   };
 }
 
-export function computeVertexNormals(positions: Float32Array, indices: Uint32Array): Float32Array {
+function computeVertexNormals(positions: Float32Array, indices: Uint32Array): Float32Array {
   const vertexCount = positions.length / 3;
   const normals = new Float32Array(positions.length);
   const counts = new Uint32Array(positions.length / 3);
