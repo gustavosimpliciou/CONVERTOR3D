@@ -128,3 +128,105 @@ export interface WorkerFailure {
   message: string;
   technical?: string;
 }
+
+// ---------------------------------------------------------------------------
+// MODO 1 — COMPRESSOR LOSSLESS (fluxo principal; não toca na malha)
+// ---------------------------------------------------------------------------
+
+export type CompressLevel = 'fast' | 'balanced' | 'max';
+
+export interface AnalyzeRequest {
+  type: 'analyze';
+  buffer: ArrayBuffer;
+  fileName: string;
+}
+
+export interface CompressRequest {
+  type: 'compress';
+  buffer: ArrayBuffer;
+  fileName: string;
+  level: CompressLevel;
+}
+
+export interface AnalyzeSuccess {
+  type: 'complete';
+  job: 'analyze';
+  analysis: CompressAnalysis;
+  elapsedMs: number;
+}
+
+export interface DecompressPackRequest {
+  type: 'decompress-pack';
+  buffer: ArrayBuffer;
+  fileName: string;
+}
+
+export type CompressorJob = 'compress' | 'decompress';
+
+export interface CompressorProgress {
+  type: 'progress';
+  job: CompressorJob;
+  phase: 'analyzing' | 'compressing' | 'validating' | 'done';
+  progress: number;
+  message: string;
+  stage?: ConversionStage;
+  elapsedMs?: number;
+  originalBytes?: number;
+  originalTriangles?: number;
+  format?: string;
+}
+
+export interface CompressAnalysis {
+  format: string;
+  confidence: string;
+  originalBytes: number;
+  originalSha256: string;
+  faces: number;
+  entropyBitsPerByte: number;
+  suggestedLevel: CompressLevel;
+  notes: string[];
+}
+
+export interface CompressorSuccess {
+  type: 'complete';
+  job: CompressorJob;
+  analysis: CompressAnalysis;
+  /** .3dpack (container inteligente). */
+  pack: ArrayBuffer;
+  packFileName: string;
+  /** .gz universal (gzip sobre os bytes originais). */
+  gzip: ArrayBuffer;
+  gzipFileName: string;
+  /** Original reconstruído por round-trip interno (prova visual/download). */
+  rebuilt: ArrayBuffer;
+  method: string;
+  transform: string;
+  tier: 'A' | 'B';
+  originalBytes: number;
+  packBytes: number;
+  gzipBytes: number;
+  ratioPack: number;
+  ratioGzip: number;
+  faces: number;
+  validation: 'LOSSLESS PASS' | 'LOSSLESS FAIL';
+  warnings: string[];
+  elapsedMs: number;
+}
+
+export interface DecompressSuccess {
+  type: 'complete';
+  job: 'decompress';
+  bytes: ArrayBuffer;
+  fileName: string;
+  format: string;
+  faces: number;
+  validation: 'LOSSLESS PASS' | 'LOSSLESS FAIL';
+  elapsedMs: number;
+}
+
+export interface CompressorFailure {
+  type: 'error';
+  job: CompressorJob;
+  message: string;
+  technical?: string;
+}

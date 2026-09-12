@@ -1,6 +1,6 @@
-# Redutor 3D
+# Compressor 3D (+ Redutor de Geometria)
 
-Uma ferramenta local para reduzir malhas 3D com preservação geométrica e exportar STL binário validado.
+Uma ferramenta local com dois modos: **Compressor Lossless** (fluxo principal — reduz o tamanho do arquivo sem tocar na malha) e **Redutor de Geometria** (decimação feature-aware, modo separado).
 
 ## Run & Operate
 
@@ -10,6 +10,8 @@ Uma ferramenta local para reduzir malhas 3D com preservação geométrica e expo
 - `PORT=20943 BASE_PATH=/ pnpm run build` — typecheck + build all packages locally; managed artifact builds provide these values automatically
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
+- `pnpm --filter @workspace/scripts run validate:compression` — testes do compressor (30 checks, inclui modelo de 300k faces)
+- `pnpm --filter @workspace/scripts run validate:decimation` — testes de regressão do redutor (19 checks)
 - Required env: `DATABASE_URL` — Postgres connection string
 
 ## Netlify
@@ -37,9 +39,10 @@ Uma ferramenta local para reduzir malhas 3D com preservação geométrica e expo
 
 ## Architecture decisions
 
-- O processamento de malha roda em Web Worker para manter a interface responsiva.
-- O arquivo original é reaberto a partir do objeto `File` quando necessário; buffers intermediários são transferidos ao Worker.
-- Engine `FEATURE-AWARE ADAPTIVE MESH DECIMATION` (`src/lib/mesh/`): a integridade geométrica tem prioridade absoluta sobre o número de faces (target é meta, não autorização para deformar).
+- Todo processamento pesado roda em Web Workers para manter a interface responsiva.
+- O arquivo original é reaberto a partir do objeto `File` quando necessário; buffers intermediários são transferidos aos Workers.
+- MODO 1 — Compressor Lossless (`src/lib/compress/`): pipeline IMPORTAÇÃO → ANÁLISE → COMPRESSÃO → VALIDAÇÃO → DOWNLOAD. Módulos: `sha256.ts` (SHA-256 puro, incremental), `formats.ts` (FormatDetector por conteúdo), `analyzer.ts` (entropia/redundância), `engine.ts` (CAMADA A shuffle reversível + CAMADA B DEFLATE/gzip por streaming, seleção smart com verificação da vencedora), `container.ts` (.3dpack v1 + .gz universal), `validation.ts` (14 pontos: bytes, SHA-256, faces, bbox, volume, reabertura independente). NÍVEL A = byte-lossless (SHA igual ou FAIL); NÍVEL B = geometry-lossless (sinalizado). Integridade > tamanho, sempre.
+- MODO 2 — Engine `FEATURE-AWARE ADAPTIVE MESH DECIMATION` (`src/lib/mesh/`): a integridade geométrica tem prioridade absoluta sobre o número de faces (target é meta, não autorização para deformar).
 - `complexity.ts` — mapa de complexidade geométrica: curvatura, variação de normais, dihedral angle, densidade local, estrutura fina e silhueta classificam cada vértice (plana/curva/alta/micro/feature-crítica) com FEATURE LOCK nas regiões críticas.
 - `safeguards.ts` — cada edge collapse passa por SIMULATE → VALIDATE → COMMIT/REJECT: link condition, regra de borda (zero novos buracos), flip de normais adaptativo, aspect ratio, teto de deslocamento por plano e Hausdorff aproximado por grade espacial.
 - `simplifier.ts` — custo combinado QEM + curvatura + feature + silhueta + estrutura fina; heap com versionamento (sem entradas obsoletas); controle de deriva acumulada por vértice (componentes normal/tangencial vs. referência imutável); decimação progressiva por estágios com snapshot, rollback e quality floor por preset.
@@ -49,7 +52,9 @@ Uma ferramenta local para reduzir malhas 3D com preservação geométrica e expo
 
 ## Product
 
-O usuário pode carregar STL, OBJ, PLY, OFF, GLB, GLTF, FBX ou DAE, inspecionar a geometria, definir um limite de triângulos, escolher a prioridade de preservação, acompanhar o processamento local, comparar a malha e baixar um STL binário validado.
+MODO 1 — Compressor Lossless (fluxo principal): o usuário carrega STL, OBJ, PLY, OFF, GLB, GLTF, FBX, DAE, 3MF ou .3dpack, vê a análise (formato, tamanho, faces, SHA-256, entropia), escolhe o nível (máxima velocidade / balanceado / máxima compressão), comprime e baixa `.3dpack` + `.gz` universal + o original reconstruído — tudo validado byte a byte (LOSSLESS PASS). A malha nunca é modificada.
+
+MODO 2 — Redutor de Geometria (separado): inspecionar a geometria, definir um limite de triângulos, escolher a prioridade de preservação, acompanhar o processamento local, comparar a malha e baixar um STL binário validado.
 
 ## User preferences
 

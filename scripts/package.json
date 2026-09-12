@@ -6,6 +6,7 @@
   "scripts": {
     "hello": "tsx ./src/hello.ts",
     "validate:decimation": "tsx ./src/validate-decimation.ts",
+    "validate:compression": "tsx ./src/validate-compression.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {

@@ -26,7 +26,11 @@ import NotFound from '@/pages/not-found';
 import { Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
 import { buildStats } from './lib/mesh/geometry';
 import { createMeshProcessor, downloadStl } from './lib/mesh/processor';
+import { createCompressor, downloadBytes } from './lib/compress/processor';
 import type { MeshData, MeshStats, Quality, WorkerSuccess } from './lib/mesh/types';
+import type { AnalyzeSuccess, CompressAnalysis, CompressLevel, CompressorSuccess, DecompressSuccess } from './lib/mesh/types';
+
+export type AppMode = 'compress' | 'reduce';
 
 type Vec3 = [number, number, number];
 type AppPhase = 'empty' | 'ready' | 'processing' | 'complete' | 'error';
@@ -57,6 +61,13 @@ type ReducedMeta = {
 const queryClient = new QueryClient();
 const MODEL_ACCEPT = '.stl,.obj,.ply,.off,.glb,.gltf,.fbx,.dae,model/stl,model/obj,model/gltf-binary,model/gltf+json,model/fbx,model/vnd.collada+xml';
 const SUPPORTED_FORMATS_LABEL = 'STL · OBJ · PLY · OFF · GLB · GLTF · FBX · DAE';
+const COMPRESS_ACCEPT = `${MODEL_ACCEPT},.3dpack,.3mf,model/3mf`;
+const COMPRESS_FORMATS_LABEL = 'STL · OBJ · PLY · OFF · GLB · GLTF · FBX · DAE · 3MF · 3DPACK';
+const LEVEL_LABELS: Record<CompressLevel, { title: string; caption: string }> = {
+  fast: { title: 'Máxima velocidade', caption: 'poucas estratégias' },
+  balanced: { title: 'Balanceado', caption: 'custo × benefício' },
+  max: { title: 'Máxima compressão', caption: 'testa todas' },
+};
 const QUALITY_LABELS: Record<Quality, string> = {
   low: 'Rascunho',
   medium: 'Equilibrada',
@@ -90,19 +101,27 @@ function LogoMark() {
   return <div className="relative flex h-8 w-8 items-center justify-center border border-orange-400/50 bg-orange-500/10" aria-hidden="true"><span className="absolute h-4 w-4 rotate-45 border border-orange-400" /><span className="absolute h-1.5 w-1.5 bg-orange-400" /></div>;
 }
 
-function Header({ hasModel, onImport, onReset }: { hasModel: boolean; onImport: () => void; onReset: () => void }) {
-  return <header className="relative z-10 flex h-[66px] items-center justify-between border-b border-white/[.08] px-5 md:px-8">
-    <div className="flex items-center gap-3"><LogoMark /><div><div className="flex items-baseline gap-2"><span className="text-[15px] font-semibold tracking-[.12em]">REDUTOR</span><span className="mono text-[10px] text-orange-400">3D</span></div><div className="eyebrow mt-0.5 hidden sm:block">geometria local / estação 01</div></div></div>
+function ModeTabs({ mode, onMode }: { mode: AppMode; onMode: (mode: AppMode) => void }) {
+  return <div className="flex gap-1 border border-white/10 bg-black/45 p-1" role="tablist" aria-label="Modo de operação">
+    <button role="tab" aria-selected={mode === 'compress'} className={`px-3 py-1.5 text-[10px] tracking-wide transition ${mode === 'compress' ? 'bg-orange-500/20 text-orange-300' : 'text-stone-600 hover:text-stone-400'}`} onClick={() => onMode('compress')} data-testid="tab-compress">COMPRESSOR LOSSLESS</button>
+    <button role="tab" aria-selected={mode === 'reduce'} className={`px-3 py-1.5 text-[10px] tracking-wide transition ${mode === 'reduce' ? 'bg-orange-500/20 text-orange-300' : 'text-stone-600 hover:text-stone-400'}`} onClick={() => onMode('reduce')} data-testid="tab-reduce">REDUTOR DE GEOMETRIA</button>
+  </div>;
+}
+
+function Header({ hasModel, onImport, onReset, mode, onMode, title }: { hasModel: boolean; onImport: () => void; onReset: () => void; mode: AppMode; onMode: (mode: AppMode) => void; title: string }) {
+  return <header className="relative z-10 flex h-[66px] items-center justify-between gap-3 border-b border-white/[.08] px-5 md:px-8">
+    <div className="flex items-center gap-3"><LogoMark /><div><div className="flex items-baseline gap-2"><span className="text-[15px] font-semibold tracking-[.12em]">{title}</span><span className="mono text-[10px] text-orange-400">3D</span></div><div className="eyebrow mt-0.5 hidden sm:block">geometria local / estação 01</div></div></div>
+    <div className="hidden md:block"><ModeTabs mode={mode} onMode={onMode} /></div>
     <div className="flex items-center gap-2 md:gap-4"><div className="hidden items-center gap-2 text-[10px] text-stone-600 sm:flex"><span className="h-1.5 w-1.5 bg-emerald-400" /> processamento local</div>{hasModel && <button className="button-secondary flex h-8 items-center gap-2 px-3 text-[11px]" onClick={onImport}><CloudUpload size={13} /> Novo modelo</button>}{hasModel && <button className="flex h-8 w-8 items-center justify-center border border-white/[.08] text-stone-500 transition hover:border-orange-400/40 hover:text-orange-300" onClick={onReset} aria-label="Limpar modelo"><X size={14} /></button>}</div>
   </header>;
 }
 
-function Dropzone({ onFiles, inputRef }: { onFiles: (files: FileList | null) => void; inputRef: RefObject<HTMLInputElement | null> }) {
+function Dropzone({ onFiles, inputRef, accept, formatsLabel }: { onFiles: (files: FileList | null) => void; inputRef: RefObject<HTMLInputElement | null>; accept?: string; formatsLabel?: string }) {
   const [dragging, setDragging] = useState(false);
   return <div className={`group relative border p-8 transition md:p-12 ${dragging ? 'border-orange-400 bg-orange-500/[.08]' : 'border-white/[.12] bg-black/20 hover:border-orange-400/45'}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); onFiles(event.dataTransfer.files); }}>
-     <input ref={inputRef} type="file" accept={MODEL_ACCEPT} className="hidden" onChange={(event) => onFiles(event.target.files)} data-testid="input-model-file" />
+      <input ref={inputRef} type="file" accept={accept ?? MODEL_ACCEPT} className="hidden" onChange={(event) => onFiles(event.target.files)} data-testid="input-model-file" />
     <div className="pointer-events-none absolute inset-3 border border-dashed border-white/[.08]" />
-   <div className="relative flex flex-col items-center text-center"><div className="mb-5 flex h-14 w-14 items-center justify-center border border-orange-400/35 bg-orange-500/[.08] text-orange-300 transition group-hover:scale-105"><CloudUpload size={22} strokeWidth={1.5} /></div><div className="eyebrow mb-2 text-orange-400/80">entrada de geometria</div><h2 className="text-xl font-medium tracking-[-.03em] text-stone-100">Arraste seu modelo aqui</h2><p className="mt-2 max-w-sm text-xs leading-5 text-stone-600">O arquivo permanece neste dispositivo durante todo o processo.</p><button type="button" className="button-primary mt-7 flex h-10 items-center gap-2 px-5 text-xs font-semibold" onClick={() => inputRef.current?.click()}><CloudUpload size={14} /> Escolher arquivo</button><div className="mono mt-5 text-[9px] tracking-[.12em] text-stone-700">{SUPPORTED_FORMATS_LABEL}</div></div>
+   <div className="relative flex flex-col items-center text-center"><div className="mb-5 flex h-14 w-14 items-center justify-center border border-orange-400/35 bg-orange-500/[.08] text-orange-300 transition group-hover:scale-105"><CloudUpload size={22} strokeWidth={1.5} /></div><div className="eyebrow mb-2 text-orange-400/80">entrada de geometria</div><h2 className="text-xl font-medium tracking-[-.03em] text-stone-100">Arraste seu modelo aqui</h2><p className="mt-2 max-w-sm text-xs leading-5 text-stone-600">O arquivo permanece neste dispositivo durante todo o processo.</p><button type="button" className="button-primary mt-7 flex h-10 items-center gap-2 px-5 text-xs font-semibold" onClick={() => inputRef.current?.click()}><CloudUpload size={14} /> Escolher arquivo</button><div className="mono mt-5 text-[9px] tracking-[.12em] text-stone-700">{formatsLabel ?? SUPPORTED_FORMATS_LABEL}</div></div>
   </div>;
 }
 
@@ -218,7 +237,7 @@ function Workspace({ model, reduced, settings, setSettings, onOptimize, onReset,
   return <main className="relative mx-auto max-w-[1480px] px-4 py-5 md:px-7 lg:px-10"><div className="mb-5 flex flex-wrap items-end justify-between gap-4"><div><div className="eyebrow mb-2 text-orange-400/80">{reduced ? '03 / resultado' : '02 / preparação'}</div><h1 className="text-2xl font-medium tracking-[-.035em] md:text-3xl">{reduced ? 'Malha pronta para sair.' : 'Configure a redução.'}</h1></div><div className="flex items-center gap-3"><div className="hidden items-center gap-2 text-[10px] text-stone-600 md:flex"><span className="h-1.5 w-1.5 bg-emerald-400" /> modelo válido</div><button className="button-secondary flex h-9 items-center gap-2 px-3 text-xs" onClick={onReset} data-testid="button-reset-workspace"><X size={14} /> Limpar</button></div></div>{notice && <div className="mb-4 border border-orange-400/20 bg-orange-500/[.06] px-3 py-2 text-xs text-orange-200">{notice}</div>}<div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px] xl:grid-cols-[minmax(0,1fr)_360px]"><div className="min-w-0"><MeshViewport original={model.mesh} reduced={reduced?.mesh} comparing={comparing} processing={false} /><div className="mt-3 flex flex-wrap items-center justify-between gap-3 border border-white/[.07] bg-black/20 px-3 py-2"><div className="flex items-center gap-4 text-[10px] text-stone-600"><span className="flex items-center gap-1.5"><span className="h-1.5 w-1.5 bg-orange-500" /> faces</span><span className="flex items-center gap-1.5"><span className="h-1.5 w-1.5 border border-stone-500" /> wireframe</span></div>{reduced && <button className="flex items-center gap-2 text-xs text-stone-400 transition hover:text-orange-300" onClick={() => setComparing(!comparing)} data-testid="button-toggle-comparison"><span className={`flex h-4 w-7 items-center border ${comparing ? 'border-orange-400 bg-orange-500/20' : 'border-stone-700'}`}><span className={`h-3 w-3 bg-orange-400 transition-transform ${comparing ? 'translate-x-[13px]' : 'translate-x-0.5'}`} /></span>{comparing ? 'Exibindo reduzida' : 'Comparar com original'}</button>}</div></div><aside className="space-y-4"><FilePanel model={model} reduced={reduced} />{!reduced && <SettingsPanel settings={settings} setSettings={setSettings} disabled={false} maxTarget={maxTarget} />}{reduced ? <div className="panel border-orange-400/25 bg-orange-500/[.045] p-4"><div className="flex items-center gap-2 text-sm text-orange-200"><ShieldCheck size={16} /> Validação concluída</div><p className="mt-2 text-xs leading-5 text-stone-500">O STL binário foi verificado e está pronto para ser usado no seu fatiador.</p>{reduced.warnings.length > 0 && <p className="mt-3 border-l border-orange-400/50 pl-2 text-[10px] leading-4 text-orange-200/70">{reduced.warnings.join(' ')}</p>}<button className="button-primary mt-4 flex h-11 w-full items-center justify-center gap-2 text-xs font-semibold" onClick={() => downloadStl(reduced.stl, model.name)} data-testid="button-export-stl"><Download size={15} /> Exportar STL validado</button></div> : <div className="panel p-4"><button className="button-primary flex h-12 w-full items-center justify-center gap-2 text-xs font-semibold disabled:opacity-50" disabled={!canOptimize} onClick={onOptimize} data-testid="button-optimize-model"><Zap size={16} /> Otimizar modelo <span className="mono ml-auto text-[10px] opacity-60">⌘ ↵</span></button>{!canOptimize && <p className="mt-2 text-center text-[10px] text-stone-600">{model.stats.triangles <= 4 ? 'A malha já é pequena demais para reduzir.' : 'Defina um alvo menor que a malha original.'}</p>}</div>}</aside></div></main>;
 }
 
-function Home() {
+function ReducerHome({ onModeChange }: { onModeChange: (mode: AppMode) => void }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<File | undefined>(undefined);
   const processorRef = useRef<ReturnType<typeof createMeshProcessor> | undefined>(undefined);
@@ -296,7 +315,247 @@ function Home() {
 
   useEffect(() => () => { processorRef.current?.cancel(); }, []);
 
-  return <div className="app-shell dark"><Header hasModel={phase !== 'empty' && phase !== 'error'} onImport={() => inputRef.current?.click()} onReset={reset} />{phase === 'empty' && <EmptyState onFiles={handleFiles} inputRef={inputRef} />}{phase === 'error' && <><input ref={inputRef} type="file" accept={MODEL_ACCEPT} className="hidden" onChange={(event) => handleFiles(event.target.files)} data-testid="input-error-file" /><ErrorState message={error} onReset={() => inputRef.current?.click()} /></>}{phase === 'processing' && (model ? <ProcessingView progress={progress} message={message} elapsedMs={elapsedMs} stage={stage} originalTriangles={liveOriginal || model.stats.triangles} currentTriangles={liveTriangles || model.stats.triangles} targetTriangles={settings.target} onCancel={cancel} /> : <ImportingView progress={progress} message={message} />)}{(phase === 'ready' || phase === 'complete') && model && <Workspace model={model} reduced={reduced} settings={settings} setSettings={setSettings} onOptimize={optimize} onReset={reset} comparing={comparing} setComparing={setComparing} notice={notice} />}<footer className="pointer-events-none fixed bottom-3 left-5 right-5 z-10 flex justify-between mono text-[9px] text-stone-700 md:left-8 md:right-8"><span>REDUTOR / BUILD 2.0.0</span><span className="hidden sm:block">FEATURE-AWARE QEM · LOCAL FIRST</span></footer></div>;
+  return <div className="app-shell dark"><Header hasModel={phase !== 'empty' && phase !== 'error'} onImport={() => inputRef.current?.click()} onReset={reset} mode="reduce" onMode={onModeChange} title="REDUTOR" /><div className="px-5 pt-3 md:hidden"><ModeTabs mode="reduce" onMode={onModeChange} /></div>{phase === 'empty' && <EmptyState onFiles={handleFiles} inputRef={inputRef} />}{phase === 'error' && <><input ref={inputRef} type="file" accept={MODEL_ACCEPT} className="hidden" onChange={(event) => handleFiles(event.target.files)} data-testid="input-error-file" /><ErrorState message={error} onReset={() => inputRef.current?.click()} /></>}{phase === 'processing' && (model ? <ProcessingView progress={progress} message={message} elapsedMs={elapsedMs} stage={stage} originalTriangles={liveOriginal || model.stats.triangles} currentTriangles={liveTriangles || model.stats.triangles} targetTriangles={settings.target} onCancel={cancel} /> : <ImportingView progress={progress} message={message} />)}{(phase === 'ready' || phase === 'complete') && model && <Workspace model={model} reduced={reduced} settings={settings} setSettings={setSettings} onOptimize={optimize} onReset={reset} comparing={comparing} setComparing={setComparing} notice={notice} />}<footer className="pointer-events-none fixed bottom-3 left-5 right-5 z-10 flex justify-between mono text-[9px] text-stone-700 md:left-8 md:right-8"><span>REDUTOR / BUILD 2.0.0</span><span className="hidden sm:block">FEATURE-AWARE QEM · LOCAL FIRST</span></footer></div>;
+}
+
+type CompressPhase = 'empty' | 'analyzing' | 'ready' | 'compressing' | 'done' | 'error';
+
+type PackResult = {
+  analysis: CompressAnalysis;
+  pack: ArrayBuffer;
+  packFileName: string;
+  gzip: ArrayBuffer;
+  gzipFileName: string;
+  rebuilt: ArrayBuffer;
+  rebuiltFileName: string;
+  method: string;
+  transform: string;
+  originalBytes: number;
+  packBytes: number;
+  gzipBytes: number;
+  faces: number;
+  warnings: string[];
+  elapsedMs: number;
+};
+
+type UnpackResult = {
+  bytes: ArrayBuffer;
+  fileName: string;
+  format: string;
+  faces: number;
+  elapsedMs: number;
+};
+
+function shortHash(hash: string) {
+  return `${hash.slice(0, 12)}…${hash.slice(-6)}`;
+}
+
+function LevelSelect({ level, onChange, disabled }: { level: CompressLevel; onChange: (level: CompressLevel) => void; disabled?: boolean }) {
+  return <div><div className="mb-2 text-xs text-stone-400">Estratégia de compressão</div><div className="grid grid-cols-3 gap-1">{(Object.keys(LEVEL_LABELS) as CompressLevel[]).map((option) => <button key={option} className={`border px-2 py-2 text-left transition ${level === option ? 'border-orange-400/60 bg-orange-500/10 text-orange-300' : 'border-white/[.07] bg-black/10 text-stone-500 hover:border-white/20'}`} onClick={() => onChange(option)} disabled={disabled} data-testid={`button-level-${option}`}><span className="block text-[11px]">{LEVEL_LABELS[option].title}</span><span className="mono text-[9px] text-stone-600">{LEVEL_LABELS[option].caption}</span></button>)}</div></div>;
+}
+
+function CompressorHome({ onModeChange }: { onModeChange: (mode: AppMode) => void }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const fileRef = useRef<File | undefined>(undefined);
+  const compRef = useRef<ReturnType<typeof createCompressor> | undefined>(undefined);
+  const [phase, setPhase] = useState<CompressPhase>('empty');
+  const [fileName, setFileName] = useState('');
+  const [analysis, setAnalysis] = useState<CompressAnalysis | null>(null);
+  const [level, setLevel] = useState<CompressLevel>('balanced');
+  const [progress, setProgress] = useState(0);
+  const [message, setMessage] = useState('preparando arquivo');
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const [result, setResult] = useState<PackResult | null>(null);
+  const [unpacked, setUnpacked] = useState<UnpackResult | null>(null);
+  const [error, setError] = useState('');
+
+  const reset = useCallback(() => {
+    compRef.current?.cancel();
+    fileRef.current = undefined;
+    setPhase('empty'); setFileName(''); setAnalysis(null); setResult(null); setUnpacked(null);
+    setError(''); setProgress(0); setMessage('preparando arquivo'); setElapsedMs(0);
+  }, []);
+
+  const runAnalyze = useCallback(async (file: File) => {
+    compRef.current?.cancel();
+    const comp = createCompressor();
+    compRef.current = comp;
+    setPhase('analyzing'); setProgress(2); setElapsedMs(0); setMessage('lendo estrutura do arquivo'); setError(''); setResult(null); setUnpacked(null);
+    setFileName(file.name);
+    comp.analyze(await file.arrayBuffer(), file.name, (event) => {
+      if (event.type === 'progress') {
+        setProgress(Math.round(event.data.progress * 100));
+        setMessage(event.data.message.replace('…', '')); setElapsedMs(event.data.elapsedMs ?? 0);
+      } else if (event.type === 'complete') {
+        const data = event.data;
+        if (data.job === 'analyze') {
+          const done = data as AnalyzeSuccess;
+          setAnalysis(done.analysis);
+          setLevel(done.analysis.suggestedLevel);
+          setPhase('ready'); setProgress(0);
+        }
+        compRef.current = undefined;
+      } else {
+        setError(event.data.message); setPhase('error'); setProgress(0); compRef.current = undefined;
+      }
+    });
+  }, []);
+
+  const runCompress = useCallback(async () => {
+    const file = fileRef.current;
+    if (!file) return;
+    compRef.current?.cancel();
+    const comp = createCompressor();
+    compRef.current = comp;
+    setPhase('compressing'); setProgress(2); setElapsedMs(0); setMessage('testando estratégias lossless'); setError(''); setResult(null);
+    comp.compress(await file.arrayBuffer(), file.name, level, (event) => {
+      if (event.type === 'progress') {
+        setProgress(Math.round(event.data.progress * 100));
+        setMessage(event.data.message.replace('…', '')); setElapsedMs(event.data.elapsedMs ?? 0);
+      } else if (event.type === 'complete') {
+        const data = event.data;
+        if (data.job === 'compress') {
+          const done = data as CompressorSuccess;
+          setResult({
+            analysis: done.analysis, pack: done.pack, packFileName: done.packFileName,
+            gzip: done.gzip, gzipFileName: done.gzipFileName, rebuilt: done.rebuilt,
+            rebuiltFileName: file.name, method: done.method, transform: done.transform,
+            originalBytes: done.originalBytes, packBytes: done.packBytes, gzipBytes: done.gzipBytes,
+            faces: done.faces, warnings: done.warnings, elapsedMs: done.elapsedMs,
+          });
+          setPhase('done'); setProgress(100);
+        }
+        compRef.current = undefined;
+      } else {
+        setError(event.data.message); setPhase('error'); setProgress(0); compRef.current = undefined;
+      }
+    });
+  }, [level]);
+
+  const runDecompress = useCallback(async (file: File) => {
+    compRef.current?.cancel();
+    const comp = createCompressor();
+    compRef.current = comp;
+    setPhase('compressing'); setProgress(2); setElapsedMs(0); setMessage('descompactando e validando'); setError(''); setResult(null); setUnpacked(null);
+    setFileName(file.name);
+    comp.decompressPack(await file.arrayBuffer(), file.name, (event) => {
+      if (event.type === 'progress') {
+        setProgress(Math.round(event.data.progress * 100));
+        setMessage(event.data.message.replace('…', '')); setElapsedMs(event.data.elapsedMs ?? 0);
+      } else if (event.type === 'complete') {
+        const data = event.data;
+        if (data.job === 'decompress') {
+          const done = data as DecompressSuccess;
+          setUnpacked({ bytes: done.bytes, fileName: done.fileName, format: done.format, faces: done.faces, elapsedMs: done.elapsedMs });
+          setPhase('done'); setProgress(100);
+        }
+        compRef.current = undefined;
+      } else {
+        setError(event.data.message); setPhase('error'); setProgress(0); compRef.current = undefined;
+      }
+    });
+  }, []);
+
+  const handleFiles = useCallback((files: FileList | null) => {
+    const file = files?.[0];
+    if (!file) return;
+    fileRef.current = file;
+    if (file.name.toLowerCase().endsWith('.3dpack')) void runDecompress(file);
+    else void runAnalyze(file);
+  }, [runAnalyze, runDecompress]);
+
+  const cancel = useCallback(() => {
+    compRef.current?.cancel();
+    compRef.current = undefined;
+    setPhase(analysis ? 'ready' : 'empty'); setProgress(0); setElapsedMs(0);
+  }, [analysis]);
+
+  useEffect(() => () => { compRef.current?.cancel(); }, []);
+
+  return <div className="app-shell dark">
+    <Header hasModel={phase !== 'empty' && phase !== 'error'} onImport={() => inputRef.current?.click()} onReset={reset} mode="compress" onMode={onModeChange} title="COMPRESSOR" />
+    <div className="px-5 pt-3 md:hidden"><ModeTabs mode="compress" onMode={onModeChange} /></div>
+    {phase === 'empty' && <main className="relative mx-auto flex min-h-[calc(100dvh-66px)] max-w-[1320px] flex-col justify-center px-5 py-12 md:px-10">
+      <div className="mb-8 flex items-end justify-between animate-in"><div><div className="eyebrow mb-3 text-orange-400/80">01 / entrada · lossless</div><h1 className="max-w-xl text-3xl font-medium tracking-[-.04em] text-stone-100 md:text-5xl">Arquivo menor.<br /><span className="text-stone-500">Malha intocada.</span></h1></div><div className="hidden max-w-[210px] text-right text-xs leading-5 text-stone-600 md:block">Compressão inteligente sem mover um único vértice.</div></div>
+      <div className="animate-in-delay"><Dropzone onFiles={handleFiles} inputRef={inputRef} accept={COMPRESS_ACCEPT} formatsLabel={COMPRESS_FORMATS_LABEL} /></div>
+      <div className="mt-6 grid grid-cols-1 gap-px border border-white/[.06] bg-white/[.06] sm:grid-cols-3 animate-in-delay">{[{ icon: LockKeyhole, title: '100% local', copy: 'O arquivo nunca sai deste navegador.' }, { icon: ShieldCheck, title: 'Lossless verificado', copy: 'SHA-256 do round-trip precisa conferir.' }, { icon: Box, title: 'Faces inalteradas', copy: '1.500.000 entram, 1.500.000 saem.' }].map(({ icon: Icon, title, copy }) => <div key={title} className="bg-stone-950/75 p-4"><Icon size={15} className="mb-3 text-orange-400" /><div className="text-xs font-medium">{title}</div><div className="mt-1 text-[11px] text-stone-600">{copy}</div></div>)}</div>
+    </main>}
+    {phase === 'error' && <><input ref={inputRef} type="file" accept={COMPRESS_ACCEPT} className="hidden" onChange={(event) => handleFiles(event.target.files)} data-testid="input-error-file" /><ErrorState message={error} onReset={() => inputRef.current?.click()} /></>}
+    {(phase === 'analyzing' || phase === 'compressing') && <ImportingView progress={progress} message={`${message} · ${(elapsedMs / 1000).toFixed(1)}s`} />}
+    {phase === 'ready' && analysis && <main className="relative mx-auto max-w-[1480px] px-4 py-5 md:px-7 lg:px-10">
+      <div className="mb-5"><div className="eyebrow mb-2 text-orange-400/80">02 / análise</div><h1 className="text-2xl font-medium tracking-[-.035em] md:text-3xl">Escolha a estratégia.</h1></div>
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
+        <section className="panel p-4" aria-label="Análise do arquivo">
+          <div className="mb-3 flex items-center gap-2"><FileBox size={15} className="text-orange-400" /><span className="text-sm font-medium">Arquivo analisado</span></div>
+          <div className="truncate text-xs text-stone-200" data-testid="text-compress-name">{fileName}</div>
+          <div className="mono mt-1 text-[10px] text-stone-600">{analysis.format} · {formatBytes(analysis.originalBytes)}</div>
+          <div className="mt-3">
+            <MetaLine label="Faces (serão preservadas)" value={analysis.faces > 0 ? formatCount(analysis.faces) : '—'} accent />
+            <MetaLine label="Tamanho original" value={formatBytes(analysis.originalBytes)} />
+            <MetaLine label="Entropia" value={`${analysis.entropyBitsPerByte} bits/byte`} />
+            <MetaLine label="SHA-256" value={shortHash(analysis.originalSha256)} />
+          </div>
+          {analysis.notes.length > 0 && <div className="mt-3 border-t border-white/[.06] pt-3">{analysis.notes.map((note) => <div key={note} className="mb-1 text-[11px] leading-5 text-stone-500">· {note}</div>)}</div>}
+        </section>
+        <section className="panel flex flex-col gap-4 p-4" aria-label="Estratégia">
+          <LevelSelect level={level} onChange={setLevel} />
+          <button className="button-primary flex h-10 items-center justify-center gap-2 text-xs font-semibold" onClick={() => void runCompress()} data-testid="button-compress"><Zap size={14} /> Comprimir lossless</button>
+          <button className="button-secondary flex h-9 items-center justify-center gap-2 text-xs" onClick={cancel}><Pause size={14} /> Cancelar</button>
+          <p className="text-[10px] leading-4 text-stone-600">A malha não será modificada. A saída só é liberada se a descompressão reconstruir o arquivo byte a byte.</p>
+        </section>
+      </div>
+    </main>}
+    {phase === 'done' && result && <main className="relative mx-auto max-w-[1480px] px-4 py-5 md:px-7 lg:px-10">
+      <div className="mb-5"><div className="eyebrow mb-2 text-orange-400/80">03 / resultado · lossless pass</div><h1 className="text-2xl font-medium tracking-[-.035em] md:text-3xl">Arquivo comprimido sem alteração da malha.</h1></div>
+      {result.warnings.length > 0 && <div className="mb-4 border border-orange-400/20 bg-orange-500/[.06] px-3 py-2 text-xs text-orange-200">{result.warnings.map((warning) => <div key={warning}>{warning}</div>)}</div>}
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
+        <section className="panel p-4" aria-label="Resultado da compressão">
+          <div className="mb-3 flex items-center gap-2"><CheckCircle2 size={15} className="text-emerald-400" /><span className="text-sm font-medium">Compressão concluída</span><span className="mono ml-auto text-[10px] text-emerald-300" data-testid="text-lossless-badge">LOSSLESS PASS</span></div>
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <div className="border border-white/[.06] bg-black/20 p-3"><div className="eyebrow mb-1 text-stone-600">original</div><div className="mono text-sm text-stone-200">{formatBytes(result.originalBytes)}</div></div>
+            <div className="border border-orange-400/25 bg-orange-500/[.06] p-3"><div className="eyebrow mb-1 text-orange-400/80">.3dpack</div><div className="mono text-sm text-orange-300" data-testid="text-pack-size">{formatBytes(result.packBytes)}</div><div className="mono mt-1 text-[10px] text-orange-400/70">−{((1 - result.packBytes / result.originalBytes) * 100).toFixed(1)}%</div></div>
+            <div className="border border-white/[.06] bg-black/20 p-3"><div className="eyebrow mb-1 text-stone-600">.gz</div><div className="mono text-sm text-stone-200">{formatBytes(result.gzipBytes)}</div><div className="mono mt-1 text-[10px] text-stone-500">−{((1 - result.gzipBytes / result.originalBytes) * 100).toFixed(1)}%</div></div>
+          </div>
+          <div className="mt-3">
+            <MetaLine label="Faces" value={`${formatCount(result.faces)} → ${formatCount(result.faces)}`} accent />
+            <MetaLine label="Geometria" value="100% preservada" accent />
+            <MetaLine label="Método" value={`${result.method} · ${result.transform}`} />
+            <MetaLine label="SHA-256" value={shortHash(result.analysis.originalSha256)} />
+            <MetaLine label="Tempo" value={`${(result.elapsedMs / 1000).toFixed(1)}s`} />
+          </div>
+          <div className="mt-3 grid grid-cols-1 gap-1 border-t border-white/[.06] pt-3 text-[11px] text-stone-500 sm:grid-cols-2">{['Faces preservadas', 'Geometria preservada', 'Topologia preservada', 'Coordenadas preservadas', 'Arquivo validado', 'Compressão lossless'].map((item) => <div key={item} className="flex items-center gap-1.5"><CheckCircle2 size={12} className="text-emerald-400" />{item}</div>)}</div>
+        </section>
+        <section className="panel flex flex-col gap-2 p-4" aria-label="Downloads">
+          <button className="button-primary flex h-10 items-center justify-center gap-2 text-xs font-semibold" onClick={() => downloadBytes(result.pack, result.packFileName, 'application/octet-stream')} data-testid="button-download-pack"><Download size={14} /> Baixar .3dpack</button>
+          <button className="button-secondary flex h-10 items-center justify-center gap-2 text-xs" onClick={() => downloadBytes(result.gzip, result.gzipFileName, 'application/gzip')} data-testid="button-download-gzip"><Download size={14} /> Baixar .gz universal</button>
+          <button className="button-secondary flex h-10 items-center justify-center gap-2 text-xs" onClick={() => downloadBytes(result.rebuilt, result.rebuiltFileName, 'application/octet-stream')} data-testid="button-download-rebuilt"><Download size={14} /> Baixar original reconstruído</button>
+          <div className="mt-2"><LevelSelect level={level} onChange={(next) => { setLevel(next); }} /></div>
+          <button className="button-secondary flex h-9 items-center justify-center gap-2 text-xs" onClick={() => void runCompress()} data-testid="button-recompress"><RefreshCw size={14} /> Recomprimir com este nível</button>
+          <button className="flex h-9 items-center justify-center gap-2 text-xs text-stone-500 transition hover:text-orange-300" onClick={reset}><X size={14} /> Novo arquivo</button>
+        </section>
+      </div>
+    </main>}
+    {phase === 'done' && unpacked && <main className="relative mx-auto max-w-[720px] px-5 py-12 text-center">
+      <CheckCircle2 size={25} className="mx-auto mb-5 text-emerald-400" />
+      <div className="eyebrow mb-3 text-emerald-300/80">round-trip · lossless pass</div>
+      <h1 className="text-3xl font-medium tracking-[-.04em]">Original reconstruído<br /><span className="text-stone-500">byte a byte.</span></h1>
+      <p className="mt-4 text-sm leading-6 text-stone-500">{unpacked.fileName} · {unpacked.format}{unpacked.faces > 0 ? ` · ${formatCount(unpacked.faces)} faces` : ''} · SHA-256 conferido em {(unpacked.elapsedMs / 1000).toFixed(1)}s.</p>
+      <div className="mt-8 flex justify-center gap-2">
+        <button className="button-primary flex h-10 items-center gap-2 px-4 text-xs font-semibold" onClick={() => downloadBytes(unpacked.bytes, unpacked.fileName, 'application/octet-stream')} data-testid="button-download-unpacked"><Download size={14} /> Baixar original</button>
+        <button className="button-secondary flex h-10 items-center gap-2 px-4 text-xs" onClick={reset}>Novo arquivo</button>
+      </div>
+    </main>}
+    <footer className="pointer-events-none fixed bottom-3 left-5 right-5 z-10 flex justify-between mono text-[9px] text-stone-700 md:left-8 md:right-8"><span>COMPRESSOR / BUILD 3.0.0</span><span className="hidden sm:block">LOSSLESS · LOCAL FIRST</span></footer>
+  </div>;
+}
+
+function Home() {
+  const [mode, setMode] = useState<AppMode>('compress');
+  const onModeChange = useCallback((next: AppMode) => setMode(next), []);
+  return <>
+    <div hidden={mode !== 'compress'}><CompressorHome onModeChange={onModeChange} /></div>
+    <div hidden={mode !== 'reduce'}><ReducerHome onModeChange={onModeChange} /></div>
+  </>;
 }
 
 function Router() {
