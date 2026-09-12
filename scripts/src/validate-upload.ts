@@ -8,7 +8,8 @@
  * recusada. Erros de leitura são específicos, nunca genéricos, e nunca
  * mencionam redução.
  */
-import { isZeroReductionError } from '../../artifacts/redutor-3d/src/lib/mesh/processor';
+import { checkProtocol, ensureReport, importTimeoutMs, isZeroReductionError } from '../../artifacts/redutor-3d/src/lib/mesh/processor';
+import { MESH_PROTOCOL } from '../../artifacts/redutor-3d/src/lib/mesh/types';
 import { NotStlError, parseStlForImport } from '../../artifacts/redutor-3d/src/lib/mesh/stl-import';
 
 let failures = 0;
@@ -150,6 +151,15 @@ const TETRA: Array<[[number, number, number], [number, number, number], [number,
   check('erro: mensagem legada', isZeroReductionError({ type: 'error', message: 'Nenhuma redução segura foi possível.' }));
   check('erro: corrompido é fatal', !isZeroReductionError({ type: 'error', message: 'STL binário truncado.' }));
   check('erro: code UNREADABLE é fatal', !isZeroReductionError({ type: 'error', code: 'UNREADABLE', message: 'Arquivo STL inválido.' }));
+}
+
+// --- 11. Blindagem worker desatualizado + timeout dimensionado ---
+{
+  check('protocolo: versão corrente aceita', checkProtocol(MESH_PROTOCOL));
+  check('protocolo: ausente/divergente rejeita', !checkProtocol(undefined) && !checkProtocol(0) && !checkProtocol(MESH_PROTOCOL + 1));
+  const fallback = ensureReport(undefined);
+  check('fallback: relatório vazio nunca quebra render', fallback.stages === 0 && fallback.stoppedReason === 'stall' && typeof fallback.meanError === 'number');
+  check('timeout: mínimo 30s e cresce com o tamanho', importTimeoutMs(1024) === 30000 && importTimeoutMs(100 * 1048576) > importTimeoutMs(10 * 1048576));
 }
 
 console.log(failures === 0 ? '\nTODOS OS TESTES PASSARAM' : `\n${failures} TESTE(S) FALHARAM`);

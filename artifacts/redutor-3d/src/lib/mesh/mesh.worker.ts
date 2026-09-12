@@ -13,6 +13,7 @@ import type {
   WorkerRequest,
   WorkerSuccess,
 } from './types';
+import { MESH_PROTOCOL } from './types';
 
 const post = (
   message: WorkerProgress | WorkerSuccess | ImportSuccess | WorkerFailure,
@@ -25,7 +26,16 @@ const post = (
  */
 async function handleImport(request: ImportRequest): Promise<void> {
   const started = performance.now();
+  const elapsed = (): number => performance.now() - started;
   const bytes = new Uint8Array(request.buffer);
+  const progress = (p: number, message: string): void => {
+    const update: WorkerProgress = {
+      type: 'progress', phase: 'analyzing', progress: p, message,
+      stage: 'ANALISANDO', elapsedMs: elapsed(), originalBytes: bytes.length,
+    };
+    post(update);
+  };
+  progress(0.1, 'Lendo a estrutura do arquivo…');
   let imported;
   try {
     imported = parseStlForImport(bytes, request.fileName);
@@ -49,9 +59,11 @@ async function handleImport(request: ImportRequest): Promise<void> {
       throw error;
     }
   }
+  progress(0.85, 'Validando a estrutura do arquivo…');
   const done: ImportSuccess = {
     type: 'complete',
     job: 'import',
+    protocol: MESH_PROTOCOL,
     positions: imported.mesh.positions,
     indices: imported.mesh.indices,
     stats: imported.stats,
@@ -213,9 +225,10 @@ self.onmessage = (event: MessageEvent<ImportRequest | WorkerRequest>) => {
       currentTriangles: reduced.triangles, originalBytes,
     });
 
-    const complete: WorkerSuccess = {
-      type: 'complete',
-      original,
+  const complete: WorkerSuccess = {
+    type: 'complete',
+    protocol: MESH_PROTOCOL,
+    original,
       reduced,
       stl,
       positions: result.positions,

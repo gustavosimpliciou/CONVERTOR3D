@@ -3,11 +3,13 @@ import type {
   ImportSuccess,
   MeshData,
   SimplifyOptions,
+  SimplifyReport,
   WorkerFailure,
   WorkerProgress,
   WorkerRequest,
   WorkerSuccess,
 } from './types';
+import { MESH_PROTOCOL } from './types';
 
 export type ProcessorEvent =
   | { type: 'progress'; data: WorkerProgress }
@@ -20,6 +22,48 @@ export type ProcessorEvent =
  */
 export function isZeroReductionError(data: WorkerFailure): boolean {
   return data.code === 'ZERO_REDUCTION' || data.message.includes('Nenhuma redução segura');
+}
+
+/**
+ * Verifica o protocolo da resposta. Blindagem contra worker desatualizado
+ * em cache: campos novos como `report` podem não existir.
+ */
+export function checkProtocol(actual: unknown): boolean {
+  return actual === MESH_PROTOCOL;
+}
+
+export const STALE_WORKER_MESSAGE =
+  'A versão do processador está desatualizada no cache do navegador. Recarregue a página (Ctrl+Shift+R) e tente novamente.';
+
+/**
+ * Timeout da importação dimensionado pelo tamanho: arquivos grandes
+ * (welding de milhões de vértices) precisam de dezenas de segundos.
+ * Só dispara se NENHUM evento chegar (hang real, ex. worker travado).
+ */
+export function importTimeoutMs(bytes: number): number {
+  return Math.max(30000, 15000 + (bytes / 1048576) * 1500);
+}
+
+/** Relatório vazio para render defensivo (nunca quebra a tela). */
+export function ensureReport(report: SimplifyReport | undefined | null): SimplifyReport {
+  if (report) return report;
+  return {
+    stages: 0,
+    commits: 0,
+    meanError: 0,
+    maxError: 0,
+    silhouetteError: 0,
+    normalError: 0,
+    curvatureError: 0,
+    volumeDeltaPercent: 0,
+    areaDeltaPercent: 0,
+    boundaryOriginal: 0,
+    boundaryFinal: 0,
+    nonManifoldEdges: 0,
+    degenerateTriangles: 0,
+    stoppedReason: 'stall',
+    escalations: 0,
+  };
 }
 
 export function createMeshProcessor() {

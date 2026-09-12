@@ -25,7 +25,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import NotFound from '@/pages/not-found';
 import { Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
 import { buildStats } from './lib/mesh/geometry';
-import { createMeshProcessor, downloadStl, isZeroReductionError } from './lib/mesh/processor';
+import { checkProtocol, createMeshProcessor, downloadStl, ensureReport, importTimeoutMs, isZeroReductionError, STALE_WORKER_MESSAGE } from './lib/mesh/processor';
 import { createCompressor, downloadBytes } from './lib/compress/processor';
 import { packGzip } from './lib/compress/container';
 import type { MeshData, MeshStats, Quality, WorkerSuccess } from './lib/mesh/types';
@@ -250,11 +250,12 @@ function LosslessHome({ onModeChange }: { onModeChange: (mode: AppMode) => void 
   }, []);
 
   const runAnalyze = useCallback(async (file: File) => {
-    compRef.current?.cancel();
-    const comp = createCompressor();
-    compRef.current = comp;
-    setPhase('analyzing'); setProgress(2); setElapsedMs(0); setMessage('lendo estrutura do arquivo'); setError(''); setResult(null); setUnpacked(null);
-    setFileName(file.name);
+    try {
+      compRef.current?.cancel();
+      const comp = createCompressor();
+      compRef.current = comp;
+      setPhase('analyzing'); setProgress(2); setElapsedMs(0); setMessage('lendo estrutura do arquivo'); setError(''); setResult(null); setUnpacked(null);
+      setFileName(file.name);
     comp.analyze(await file.arrayBuffer(), file.name, (event) => {
       if (event.type === 'progress') {
         setProgress(Math.round(event.data.progress * 100));
@@ -271,15 +272,20 @@ function LosslessHome({ onModeChange }: { onModeChange: (mode: AppMode) => void 
         setError(event.data.message); setPhase('error'); setProgress(0); compRef.current = undefined;
       }
     });
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Não foi possível analisar este arquivo.');
+      setPhase('error'); setProgress(0); compRef.current = undefined;
+    }
   }, []);
 
   const runOptimize = useCallback(async () => {
     const file = fileRef.current;
     if (!file) return;
-    compRef.current?.cancel();
-    const comp = createCompressor();
-    compRef.current = comp;
-    setPhase('compressing'); setProgress(2); setElapsedMs(0); setMessage('otimizando a representação'); setError(''); setResult(null);
+    try {
+      compRef.current?.cancel();
+      const comp = createCompressor();
+      compRef.current = comp;
+      setPhase('compressing'); setProgress(2); setElapsedMs(0); setMessage('otimizando a representação'); setError(''); setResult(null);
     comp.optimize(await file.arrayBuffer(), file.name, (event) => {
       if (event.type === 'progress') {
         setProgress(Math.round(event.data.progress * 100));
@@ -308,14 +314,19 @@ function LosslessHome({ onModeChange }: { onModeChange: (mode: AppMode) => void 
         setError(event.data.message); setPhase('error'); setProgress(0); compRef.current = undefined;
       }
     });
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Falha ao iniciar a otimização.');
+      setPhase(analysis ? 'ready' : 'empty'); setProgress(0); compRef.current = undefined;
+    }
   }, []);
 
   const runDecompress = useCallback(async (file: File) => {
-    compRef.current?.cancel();
-    const comp = createCompressor();
-    compRef.current = comp;
-    setPhase('compressing'); setProgress(2); setElapsedMs(0); setMessage('descompactando e validando'); setError(''); setResult(null); setUnpacked(null);
-    setFileName(file.name);
+    try {
+      compRef.current?.cancel();
+      const comp = createCompressor();
+      compRef.current = comp;
+      setPhase('compressing'); setProgress(2); setElapsedMs(0); setMessage('descompactando e validando'); setError(''); setResult(null); setUnpacked(null);
+      setFileName(file.name);
     comp.decompressPack(await file.arrayBuffer(), file.name, (event) => {
       if (event.type === 'progress') {
         setProgress(Math.round(event.data.progress * 100));
@@ -332,6 +343,10 @@ function LosslessHome({ onModeChange }: { onModeChange: (mode: AppMode) => void 
         setError(event.data.message); setPhase('error'); setProgress(0); compRef.current = undefined;
       }
     });
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Falha ao descompactar.');
+      setPhase('empty'); setProgress(0); compRef.current = undefined;
+    }
   }, []);
 
   const handleFiles = useCallback((files: FileList | null) => {
@@ -508,78 +523,115 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
   }, []);
 
   const runImport = useCallback(async (file: File) => {
-    procRef.current?.cancel();
-    const proc = createMeshProcessor();
-    procRef.current = proc;
-    setPhase('importing'); setProgress(2); setElapsedMs(0); setMessage('lendo estrutura do arquivo'); setError(''); setNotice('');
-    setTopology(null); setQuirks([]); setReduced(null);
-    // IMPORTAÇÃO PURA: só parse + validação estrutural. Nenhuma redução,
-    // nenhum target — o upload é aceito se o arquivo for legível.
-    proc.parse(await file.arrayBuffer(), file.name, (event) => {
-      if (event.type === 'progress') {
-        setProgress(Math.round(event.data.progress * 100));
-        setMessage(event.data.message.replace('…', '')); setElapsedMs(event.data.elapsedMs ?? 0);
-      } else if (event.type === 'complete') {
-        const data = event.data;
-        if (data.job === 'import') {
-          const imported: MeshData = { positions: data.positions, indices: data.indices, format: data.format, bounds: data.stats.bounds };
-          setModel({ name: file.name, format: data.formatLabel, bytes: file.size, stats: data.stats, mesh: imported });
-          setTopology(data.topology);
-          setQuirks(data.quirks);
-          setPhase('ready'); setProgress(0);
-          setMessage('Modelo carregado com sucesso.');
-        }
+    try {
+      procRef.current?.cancel();
+      const proc = createMeshProcessor();
+      procRef.current = proc;
+      setPhase('importing'); setProgress(2); setElapsedMs(0); setMessage('lendo estrutura do arquivo'); setError(''); setNotice('');
+      setTopology(null); setQuirks([]); setReduced(null);
+      // Watchdog anti-hang: rearmado a cada evento; se o worker ficar mudo
+      // (travado ou desatualizado ignorando a mensagem), vira erro acionável.
+      let timeout = 0;
+      const failHang = (): void => {
+        procRef.current?.cancel();
         procRef.current = undefined;
-      } else {
-        // Aqui sim é erro de LEITURA (arquivo inválido/corrompido).
-        setError(event.data.message); setPhase('error'); setProgress(0); procRef.current = undefined;
-      }
-    });
+        setError(`O processamento não respondeu em ${Math.round(importTimeoutMs(file.size) / 1000)}s. ${STALE_WORKER_MESSAGE}`);
+        setPhase('error'); setProgress(0);
+      };
+      const poke = (): void => {
+        window.clearTimeout(timeout);
+        timeout = window.setTimeout(failHang, importTimeoutMs(file.size));
+      };
+      const disarm = (): void => window.clearTimeout(timeout);
+      poke();
+      // IMPORTAÇÃO PURA: só parse + validação estrutural. Nenhuma redução,
+      // nenhum target — o upload é aceito se o arquivo for legível.
+      proc.parse(await file.arrayBuffer(), file.name, (event) => {
+        poke();
+        if (event.type === 'progress') {
+          setProgress(Math.round(event.data.progress * 100));
+          setMessage(event.data.message.replace('…', '')); setElapsedMs(event.data.elapsedMs ?? 0);
+        } else if (event.type === 'complete') {
+          const data = event.data;
+          if (data.job === 'import') {
+            if (!checkProtocol((data as { protocol?: unknown }).protocol) || !data.positions || !data.indices || !data.stats || !data.topology) {
+              setError(STALE_WORKER_MESSAGE); setPhase('error'); setProgress(0);
+            } else {
+              const imported: MeshData = { positions: data.positions, indices: data.indices, format: data.format, bounds: data.stats.bounds };
+              setModel({ name: file.name, format: data.formatLabel, bytes: file.size, stats: data.stats, mesh: imported });
+              setTopology(data.topology);
+              setQuirks(Array.isArray(data.quirks) ? data.quirks : []);
+              setPhase('ready'); setProgress(0);
+              setMessage('Modelo carregado com sucesso.');
+            }
+          }
+          disarm();
+          procRef.current = undefined;
+        } else {
+          // Aqui sim é erro de LEITURA (arquivo inválido/corrompido).
+          disarm();
+          setError(event.data.message); setPhase('error'); setProgress(0); procRef.current = undefined;
+        }
+      });
+    } catch (error) {
+      // Nada escapa como exceção não tratada: vira tela de erro acionável.
+      setError(error instanceof Error ? error.message : 'Não foi possível ler este arquivo.');
+      setPhase('error'); setProgress(0); procRef.current = undefined;
+    }
   }, []);
 
   const runReduce = useCallback(async () => {
     const file = fileRef.current;
     if (!file || !model) return;
-    const targetFaces = targetFacesForSize(file.size, model.stats.triangles, targetPercent);
-    procRef.current?.cancel();
-    const proc = createMeshProcessor();
-    procRef.current = proc;
-    setPhase('reducing'); setProgress(2); setElapsedMs(0); setMessage('mapeando importância geométrica'); setError(''); setReduced(null); setNotice('');
-    setStage('ANALISANDO'); setLiveTriangles(0); setLiveOriginal(0);
-    const tris = model.stats.triangles;
-    const budget = tris < 500000 ? 55_000 : Math.min(300000, 55000 + ((tris - 500000) / 500000) * 60000);
-    proc.process(await file.arrayBuffer(), file.name, {
-      targetTriangles: targetFaces, quality: PROFILE_QUALITY[profile],
-      preserveBorders: true, preserveSilhouette: true, protectDetails: true,
-      profile, timeBudgetMs: Math.round(budget),
-    }, (event) => {
-      if (event.type === 'progress') {
-        setProgress(Math.round(event.data.progress * 100));
-        setMessage(event.data.message.replace('…', '')); setElapsedMs(event.data.elapsedMs ?? 0);
-        if (event.data.stage) setStage(event.data.stage);
-        if (event.data.currentTriangles) setLiveTriangles(event.data.currentTriangles);
-        if (event.data.originalTriangles) setLiveOriginal(event.data.originalTriangles);
-      } else if (event.type === 'complete') {
-        const result: WorkerSuccess = event.data;
-        const mesh: MeshData = { positions: result.positions, indices: result.indices, format: result.format, bounds: result.reduced.bounds };
-        setReduced({
-          stats: result.reduced, mesh, stl: result.stl.buffer, report: result.report,
-          validation: result.validation, warnings: result.warnings,
-        });
-        setComparing(true); setProgress(100); setPhase('done');
-        procRef.current = undefined;
-      } else {
-        // Falha de OTIMIZAÇÃO ≠ falha de upload: o modelo continua
-        // carregado; o aviso explica e sugere alternativas.
-        if (isZeroReductionError(event.data)) {
-          setNotice(`${event.data.message} Tente o perfil Máximo ou a aba Sem alterar malha.`);
-          setPhase('ready'); setProgress(0);
+    try {
+      const targetFaces = targetFacesForSize(file.size, model.stats.triangles, targetPercent);
+      procRef.current?.cancel();
+      const proc = createMeshProcessor();
+      procRef.current = proc;
+      setPhase('reducing'); setProgress(2); setElapsedMs(0); setMessage('mapeando importância geométrica'); setError(''); setReduced(null); setNotice('');
+      setStage('ANALISANDO'); setLiveTriangles(0); setLiveOriginal(0);
+      const tris = model.stats.triangles;
+      const budget = tris < 500000 ? 55_000 : Math.min(300000, 55000 + ((tris - 500000) / 500000) * 60000);
+      proc.process(await file.arrayBuffer(), file.name, {
+        targetTriangles: targetFaces, quality: PROFILE_QUALITY[profile],
+        preserveBorders: true, preserveSilhouette: true, protectDetails: true,
+        profile, timeBudgetMs: Math.round(budget),
+      }, (event) => {
+        if (event.type === 'progress') {
+          setProgress(Math.round(event.data.progress * 100));
+          setMessage(event.data.message.replace('…', '')); setElapsedMs(event.data.elapsedMs ?? 0);
+          if (event.data.stage) setStage(event.data.stage);
+          if (event.data.currentTriangles) setLiveTriangles(event.data.currentTriangles);
+          if (event.data.originalTriangles) setLiveOriginal(event.data.originalTriangles);
+        } else if (event.type === 'complete') {
+          const result = event.data as WorkerSuccess;
+          if (!checkProtocol((result as { protocol?: unknown }).protocol) || !result.positions || !result.indices || !result.reduced || !result.stl) {
+            setError(STALE_WORKER_MESSAGE); setPhase('error'); setProgress(0);
+          } else {
+            const mesh: MeshData = { positions: result.positions, indices: result.indices, format: result.format, bounds: result.reduced.bounds };
+            setReduced({
+              stats: result.reduced, mesh, stl: result.stl.buffer, report: ensureReport(result.report),
+              validation: result.validation, warnings: Array.isArray(result.warnings) ? result.warnings : [],
+            });
+            setComparing(true); setProgress(100); setPhase('done');
+          }
+          procRef.current = undefined;
         } else {
-          setError(event.data.message); setPhase('error'); setProgress(0);
+          // Falha de OTIMIZAÇÃO ≠ falha de upload: o modelo continua
+          // carregado; o aviso explica e sugere alternativas.
+          if (isZeroReductionError(event.data)) {
+            setNotice(`${event.data.message} Tente o perfil Máximo ou a aba Sem alterar malha.`);
+            setPhase('ready'); setProgress(0);
+          } else {
+            setError(event.data.message); setPhase('error'); setProgress(0);
+          }
+          procRef.current = undefined;
         }
-        procRef.current = undefined;
-      }
-    });
+      });
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Falha ao iniciar a compressão.');
+      setPhase(model ? 'ready' : 'empty'); setProgress(0); procRef.current = undefined;
+    }
   }, [model, targetPercent, profile]);
 
   const handleFiles = useCallback((files: FileList | null) => {

@@ -121,9 +121,13 @@ export interface ImportTopology {
   volume: number;
 }
 
+/** Versão do protocolo worker↔UI. UI rejeita respostas com protocolo diferente. */
+export const MESH_PROTOCOL = 5;
+
 export interface ImportSuccess {
   type: 'complete';
   job: 'import';
+  protocol: number;
   positions: Float32Array;
   indices: Uint32Array;
   stats: MeshStats;
@@ -181,6 +185,7 @@ export interface WorkerProgress {
 
 export interface WorkerSuccess {
   type: 'complete';
+  protocol: number;
   original: MeshStats;
   reduced: MeshStats;
   stl: BinaryStlResult;
