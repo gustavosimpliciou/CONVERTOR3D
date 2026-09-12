@@ -10,6 +10,7 @@ export type TopologyAudit = {
   surfaceArea: number;
   bounds: Bounds;
   degenerateTriangles: number;
+  orientationConflicts: number;
   valid: boolean;
   reasons: string[];
 };
@@ -33,7 +34,8 @@ function countBoundaryLoops(mesh: MeshData, edges: Map<string, number>) {
     const [a, b] = key.split(':').map(Number);
     if (!adjacency.has(a)) adjacency.set(a, new Set());
     if (!adjacency.has(b)) adjacency.set(b, new Set());
-    adjacency.get(a)!.add(b); adjacency.get(b)!.add(a);
+    adjacency.get(a)!.add(b);
+    adjacency.get(b)!.add(a);
   }
   const visited = new Set<number>();
   let loops = 0;
@@ -49,6 +51,22 @@ function countBoundaryLoops(mesh: MeshData, edges: Map<string, number>) {
     }
   }
   return loops;
+}
+
+function countOrientationConflicts(mesh: MeshData) {
+  const directed = new Map<string, number>();
+  for (let i = 0; i < mesh.indices.length; i += 3) {
+    const [a, b, c] = [mesh.indices[i], mesh.indices[i + 1], mesh.indices[i + 2]];
+    for (const [u, v] of [[a, b], [b, c], [c, a]]) {
+      const forward = `${u}:${v}`;
+      const reverse = `${v}:${u}`;
+      directed.set(forward, (directed.get(forward) ?? 0) + 1);
+      if ((directed.get(reverse) ?? 0) > 0) directed.set(reverse, (directed.get(reverse) ?? 0) - 1);
+    }
+  }
+  let conflicts = 0;
+  for (const count of directed.values()) if (count > 1) conflicts += count - 1;
+  return conflicts;
 }
 
 function countComponents(mesh: MeshData) {
@@ -102,10 +120,13 @@ export function auditMesh(mesh: MeshData, reference?: TopologyAudit): TopologyAu
     surfaceArea: surfaceArea(mesh),
     bounds: calculateBounds(mesh.positions),
     degenerateTriangles: stats.degenerateTriangles,
+    orientationConflicts: countOrientationConflicts(mesh),
     valid: stats.finite && stats.degenerateTriangles === 0,
     reasons: [],
   };
   if (audit.nonManifoldEdges) audit.reasons.push('A malha contém arestas non-manifold.');
+  if (audit.orientationConflicts) audit.reasons.push('A orientação das faces contém conflitos de winding.');
+  if (reference && audit.orientationConflicts > reference.orientationConflicts) audit.reasons.push('A operação criou conflitos de orientação.');
   if (reference && audit.boundaryLoops > reference.boundaryLoops) audit.reasons.push('A operação criaria novos loops de abertura.');
   if (reference && audit.components < reference.components) audit.reasons.push('Um componente da malha seria perdido.');
   if (reference && audit.components > reference.components) audit.reasons.push('A operação criaria componentes indevidos.');

@@ -81,6 +81,22 @@ function canCollapse(
   b: number,
   next: [number, number, number],
 ): boolean {
+  const neighbors = (vertex: number) => {
+    const result = new Set<number>();
+    for (const tri of triangles) {
+      if (tri[0] < 0 || !tri.includes(vertex)) continue;
+      for (const other of tri) if (other >= 0 && other !== vertex) result.add(other);
+    }
+    return result;
+  };
+  const shared = new Set<number>();
+  for (const t of affected) {
+    const tri = triangles[t];
+    if (tri.includes(a) && tri.includes(b)) for (const vertex of tri) if (vertex !== a && vertex !== b && vertex >= 0) shared.add(vertex);
+  }
+  const common = [...neighbors(a)].filter((vertex) => neighbors(b).has(vertex) && vertex !== a && vertex !== b);
+  if (common.length !== shared.size || common.some((vertex) => !shared.has(vertex))) return false;
+
   for (const t of affected) {
     const tri = triangles[t];
     const before = triangleNormal(positions, tri[0], tri[1], tri[2]);
@@ -93,7 +109,8 @@ function canCollapse(
     const afterLength = Math.hypot(...after);
     if (afterLength < 1e-10 || beforeLength < 1e-10) return false;
     const dot = (before[0] * after[0] + before[1] * after[1] + before[2] * after[2]) / (beforeLength * afterLength);
-    if (dot < 0.15) return false;
+    const areaRatio = afterLength / beforeLength;
+    if (dot < 0.35 || areaRatio < 0.08 || areaRatio > 12) return false;
   }
   return true;
 }
@@ -104,6 +121,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
   const originalTriangles = mesh.indices.length / 3;
   const target = Math.max(4, Math.floor(options.targetTriangles));
   const referenceAudit = auditMesh(mesh);
+  const mustRemainWatertight = referenceAudit.boundaryLoops === 0 && referenceAudit.boundaryEdges === 0;
   if (target >= originalTriangles) {
     return { positions: mesh.positions, indices: mesh.indices, triangles: originalTriangles, vertices: mesh.positions.length / 3, reductionPercent: 0, warnings: referenceAudit.reasons, stoppedSafely: false, elapsedMs: performance.now() - startedAt, validation: { watertight: referenceAudit.boundaryLoops === 0, boundaryLoops: referenceAudit.boundaryLoops, nonManifoldEdges: referenceAudit.nonManifoldEdges, volumeDeltaPercent: 0, boundsDeltaPercent: 0, qualityAccepted: referenceAudit.valid } };
   }
@@ -161,6 +179,22 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     }
   }
 
+  const vertexFeatureWeight = new Float64Array(aliveVertices.length);
+  for (let vertex = 0; vertex < vertexTriangles.length; vertex += 1) {
+    const incident = [...vertexTriangles[vertex]].filter((triangle) => triangle >= 0);
+    if (incident.length < 2) continue;
+    let normalVariation = 0;
+    for (let i = 0; i < incident.length; i += 1) {
+      for (let j = i + 1; j < incident.length; j += 1) {
+        const left = faceNormals[incident[i]], right = faceNormals[incident[j]];
+        const leftLength = Math.hypot(...left), rightLength = Math.hypot(...right);
+        if (!leftLength || !rightLength) continue;
+        const cosine = Math.max(-1, Math.min(1, (left[0] * right[0] + left[1] * right[1] + left[2] * right[2]) / (leftLength * rightLength)));
+        normalVariation = Math.max(normalVariation, 1 - cosine);
+      }
+    }
+    vertexFeatureWeight[vertex] = normalVariation;
+  }
   const heap = new MinHeap();
   const pushEdge = (a: number, b: number) => {
     if (a === b || !aliveVertices[a] || !aliveVertices[b]) return;
@@ -169,7 +203,9 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     const pb: [number, number, number] = [positions[b * 3], positions[b * 3 + 1], positions[b * 3 + 2]];
     const position = optimalPosition(q, pa, pb);
     const detailPenalty = options.protectDetails ? (options.quality === 'ultra' ? 1.8 : options.quality === 'high' ? 1.35 : 1.1) : 1;
-    heap.push({ a, b, position, cost: evaluate(q, position) * detailPenalty });
+    const featurePenalty = options.protectDetails ? 1 + Math.max(vertexFeatureWeight[a], vertexFeatureWeight[b]) * (options.quality === 'ultra' ? 7 : 3) : 1;
+    const borderPenalty = options.preserveSilhouette && edgeCounts.get(keyOf(a, b)) === 1 ? 1000 : 1;
+    heap.push({ a, b, position, cost: evaluate(q, position) * detailPenalty * featurePenalty * borderPenalty });
   };
   for (const key of edges) {
     const [a, b] = key.split(':').map(Number);
@@ -189,16 +225,22 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     const candidate = heap.pop();
     if (!candidate) break;
     const { a, b, position } = candidate;
-    if (!aliveVertices[a] || !aliveVertices[b] || !edges.has(keyOf(a, b))) continue;
+    const edgeKey = keyOf(a, b);
+    if (!aliveVertices[a] || !aliveVertices[b] || !edges.has(edgeKey)) continue;
+    if ((options.preserveBorders || mustRemainWatertight) && edgeCounts.get(edgeKey) === 1) continue;
     const affected = new Set<number>([...vertexTriangles[a], ...vertexTriangles[b]]);
     if (!canCollapse(positions, triangles, affected, a, b, position)) continue;
 
     const touchedEdges = new Set<string>();
     for (const t of affected) {
       const tri = triangles[t];
+      if (tri[0] < 0) continue;
       for (const [u, v] of [[tri[0], tri[1]], [tri[1], tri[2]], [tri[2], tri[0]]]) touchedEdges.add(keyOf(u, v));
     }
-    for (const key of touchedEdges) edges.delete(key);
+    for (const key of touchedEdges) {
+      edges.delete(key);
+      edgeCounts.delete(key);
+    }
     positions[a * 3] = position[0]; positions[a * 3 + 1] = position[1]; positions[a * 3 + 2] = position[2];
     quadrics[a] = addQuadric(quadrics[a], quadrics[b]);
     aliveVertices[b] = 0;
@@ -216,6 +258,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       for (const [u, v] of [[updated[0], updated[1]], [updated[1], updated[2]], [updated[2], updated[0]]]) {
         const key = keyOf(u, v);
         edges.add(key);
+        edgeCounts.set(key, (edgeCounts.get(key) ?? 0) + 1);
         pushEdge(u, v);
       }
     }

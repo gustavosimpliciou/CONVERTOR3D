@@ -1,4 +1,5 @@
 import { buildStats } from './geometry';
+import { auditMesh, auditWithinTolerance } from './validation';
 import { parseMesh } from './parser';
 import { simplifyMesh } from './simplifier';
 import { exportBinaryStl } from './stl';
@@ -35,6 +36,11 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
       bounds: buildStats({ ...mesh, positions: result.positions, indices: result.indices }).bounds,
     };
     const reduced = buildStats(reducedMesh);
+    const referenceAudit = auditMesh(mesh);
+    const finalAudit = auditMesh(reducedMesh, referenceAudit);
+    if (!finalAudit.valid || !auditWithinTolerance(finalAudit, referenceAudit)) {
+      throw new Error(`A malha reduzida não passou na validação final: ${finalAudit.reasons.join(' ') || 'tolerância geométrica excedida.'}`);
+    }
     post({ type: 'progress', phase: 'validating', progress: 0.86, message: 'Validando a malha reduzida…', stats: reduced, elapsedMs: performance.now() - started, originalTriangles: original.triangles, targetTriangles: request.targetTriangles });
     const stl = exportBinaryStl(reducedMesh);
     if (!stl.valid) throw new Error(stl.error ?? 'Falha durante a geração do STL.');

@@ -120,10 +120,42 @@ export function normalizeTriangles(
   triangles: number[][],
   format: MeshData['format'],
 ): MeshData {
+  const bounds = calculateBounds(new Float32Array(positions));
+  const diagonal = Math.hypot(...bounds.size);
+  const tolerance = Math.max(diagonal * 1e-7, 1e-9);
+  const buckets = new Map<string, number[]>();
+  const welded = new Array<number>(positions.length / 3);
+  const cell = (value: number) => Math.floor(value / tolerance);
+  const distanceSquared = (a: number, b: number) => {
+    const dx = positions[a * 3] - positions[b * 3];
+    const dy = positions[a * 3 + 1] - positions[b * 3 + 1];
+    const dz = positions[a * 3 + 2] - positions[b * 3 + 2];
+    return dx * dx + dy * dy + dz * dz;
+  };
+  for (let vertex = 0; vertex < positions.length / 3; vertex += 1) {
+    const x = positions[vertex * 3], y = positions[vertex * 3 + 1], z = positions[vertex * 3 + 2];
+    const cx = cell(x), cy = cell(y), cz = cell(z);
+    let representative: number | undefined;
+    let nearest = tolerance * tolerance;
+    for (let ox = -1; ox <= 1; ox += 1) for (let oy = -1; oy <= 1; oy += 1) for (let oz = -1; oz <= 1; oz += 1) {
+      for (const candidate of buckets.get(`${cx + ox}:${cy + oy}:${cz + oz}`) ?? []) {
+        const distance = distanceSquared(vertex, candidate);
+        if (distance <= nearest) { nearest = distance; representative = candidate; }
+      }
+    }
+    if (representative === undefined) representative = vertex;
+    welded[vertex] = representative;
+    const key = `${cx}:${cy}:${cz}`;
+    const bucket = buckets.get(key) ?? [];
+    bucket.push(representative);
+    buckets.set(key, bucket);
+  }
   const valid: number[] = [];
   for (const triangle of triangles) {
-    if (triangle.length !== 3) continue;
-    const [a, b, c] = triangle;
+    const normalizedTriangle = triangle.map((index) => welded[index] ?? -1);
+    if (normalizedTriangle.some((index) => index < 0)) continue;
+    if (normalizedTriangle.length !== 3) continue;
+    const [a, b, c] = normalizedTriangle;
     if (a === b || b === c || a === c) continue;
     const ia = a * 3;
     const ib = b * 3;
