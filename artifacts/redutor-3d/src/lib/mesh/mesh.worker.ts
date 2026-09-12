@@ -22,7 +22,12 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
       preserveBorders: request.preserveBorders,
       preserveSilhouette: request.preserveSilhouette,
       protectDetails: request.protectDetails,
-    }, (progress) => post({ type: 'progress', phase: 'simplifying', progress: 0.2 + progress * 0.58, message: 'Simplificando com preservação de detalhes…' }));
+      timeBudgetMs: request.timeBudgetMs ?? 55_000,
+      onCheckpoint: () => {
+        post({ type: 'progress', phase: 'simplifying', progress: 0.2, message: 'Simplificando com preservação de detalhes…', elapsedMs: performance.now() - started, originalTriangles: original.triangles, targetTriangles: request.targetTriangles });
+        return true;
+      },
+    });
     const reducedMesh: MeshData = {
       positions: result.positions,
       indices: result.indices,
@@ -30,7 +35,7 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
       bounds: buildStats({ ...mesh, positions: result.positions, indices: result.indices }).bounds,
     };
     const reduced = buildStats(reducedMesh);
-    post({ type: 'progress', phase: 'validating', progress: 0.86, message: 'Validando a malha reduzida…', stats: reduced });
+    post({ type: 'progress', phase: 'validating', progress: 0.86, message: 'Validando a malha reduzida…', stats: reduced, elapsedMs: performance.now() - started, originalTriangles: original.triangles, targetTriangles: request.targetTriangles });
     const stl = exportBinaryStl(reducedMesh);
     if (!stl.valid) throw new Error(stl.error ?? 'Falha durante a geração do STL.');
     post({ type: 'progress', phase: 'exporting', progress: 0.96, message: 'Gerando STL binário validado…' });
@@ -42,6 +47,7 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
       positions: result.positions,
       indices: result.indices,
       warnings: [...result.warnings, ...(original.degenerateTriangles ? ['Faces degeneradas foram descartadas durante a importação.'] : [])],
+      validation: result.validation,
       format: mesh.format,
     };
     post(complete, [result.positions.buffer, result.indices.buffer, stl.buffer]);

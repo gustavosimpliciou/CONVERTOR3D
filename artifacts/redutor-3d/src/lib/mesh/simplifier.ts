@@ -1,4 +1,5 @@
 import { calculateBounds, compactMesh, triangleAreaSquared } from './geometry';
+import { auditMesh, auditWithinTolerance } from './validation';
 import type { MeshData, SimplifyOptions, SimplifyResult } from './types';
 
 type Quadric = [number, number, number, number, number, number, number, number, number, number];
@@ -98,10 +99,13 @@ function canCollapse(
 }
 
 export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgress?: (progress: number) => void): SimplifyResult {
+  const startedAt = performance.now();
+  const deadline = startedAt + (options.timeBudgetMs ?? 55_000);
   const originalTriangles = mesh.indices.length / 3;
   const target = Math.max(4, Math.floor(options.targetTriangles));
+  const referenceAudit = auditMesh(mesh);
   if (target >= originalTriangles) {
-    return { positions: mesh.positions, indices: mesh.indices, triangles: originalTriangles, vertices: mesh.positions.length / 3, reductionPercent: 0, warnings: [] };
+    return { positions: mesh.positions, indices: mesh.indices, triangles: originalTriangles, vertices: mesh.positions.length / 3, reductionPercent: 0, warnings: referenceAudit.reasons, stoppedSafely: false, elapsedMs: performance.now() - startedAt, validation: { watertight: referenceAudit.boundaryLoops === 0, boundaryLoops: referenceAudit.boundaryLoops, nonManifoldEdges: referenceAudit.nonManifoldEdges, volumeDeltaPercent: 0, boundsDeltaPercent: 0, qualityAccepted: referenceAudit.valid } };
   }
 
   const positions = Array.from(mesh.positions);
@@ -175,7 +179,12 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
   let activeTriangles = triangles.length;
   let iterations = 0;
   const maxIterations = Math.max(1000, originalTriangles * 3);
+  let stoppedSafely = false;
   while (activeTriangles > target && iterations < maxIterations) {
+    if (performance.now() >= deadline || options.onCheckpoint?.(activeTriangles) === false) {
+      stoppedSafely = true;
+      break;
+    }
     iterations += 1;
     const candidate = heap.pop();
     if (!candidate) break;
@@ -218,19 +227,6 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
   for (const tri of triangles) {
     if (tri[0] >= 0 && tri[1] >= 0 && tri[2] >= 0 && new Set(tri).size === 3) outputTriangles.push(...tri);
   }
-  if (outputTriangles.length / 3 > target) {
-    // A pathological/non-manifold mesh can reject every remaining collapse.
-    // Keep an even spatial sample as a last-resort hard budget guard rather
-    // than ever returning more triangles than the user's requested limit.
-    const source = outputTriangles;
-    const sourceCount = source.length / 3;
-    const fallback: number[] = [];
-    for (let i = 0; i < target; i += 1) {
-      const at = Math.min(sourceCount - 1, Math.floor((i * sourceCount) / target));
-      fallback.push(source[at * 3], source[at * 3 + 1], source[at * 3 + 2]);
-    }
-    outputTriangles = fallback;
-  }
   const validOutputTriangles: number[] = [];
   for (let i = 0; i < outputTriangles.length; i += 3) {
     const a = outputTriangles[i];
@@ -247,12 +243,31 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     }
   }
   const compact = compactMesh(positions, validOutputTriangles, mesh.format);
+  const finalAudit = auditMesh(compact, referenceAudit);
+  const safeWithinTolerance = finalAudit.valid && auditWithinTolerance(finalAudit, referenceAudit);
+  const warnings = [
+    ...(activeTriangles > target ? ['A preservação geométrica impediu atingir o alvo; o melhor estado seguro foi mantido.'] : []),
+    ...finalAudit.reasons,
+    ...(!safeWithinTolerance ? ['A tolerância geométrica foi excedida; o resultado foi interrompido com segurança.'] : []),
+  ];
+  const output = safeWithinTolerance ? compact : mesh;
+  const outputAudit = safeWithinTolerance ? finalAudit : referenceAudit;
   return {
-    positions: compact.positions,
-    indices: compact.indices,
-    triangles: compact.indices.length / 3,
-    vertices: compact.positions.length / 3,
-    reductionPercent: ((originalTriangles - compact.indices.length / 3) / originalTriangles) * 100,
-    warnings: activeTriangles > target ? ['A malha exigiu uma amostragem de segurança para respeitar o limite máximo de triângulos.'] : [],
+    positions: output.positions,
+    indices: output.indices,
+    triangles: output.indices.length / 3,
+    vertices: output.positions.length / 3,
+    reductionPercent: ((originalTriangles - output.indices.length / 3) / originalTriangles) * 100,
+    warnings,
+    stoppedSafely: stoppedSafely || !safeWithinTolerance,
+    elapsedMs: performance.now() - startedAt,
+    validation: {
+      watertight: outputAudit.boundaryLoops === 0,
+      boundaryLoops: outputAudit.boundaryLoops,
+      nonManifoldEdges: outputAudit.nonManifoldEdges,
+      volumeDeltaPercent: Math.abs(Math.abs(outputAudit.volume) - Math.abs(referenceAudit.volume)) / Math.max(Math.abs(referenceAudit.volume), 1e-9) * 100,
+      boundsDeltaPercent: Math.max(...outputAudit.bounds.min.map((v, i) => Math.abs(v - referenceAudit.bounds.min[i])), ...outputAudit.bounds.max.map((v, i) => Math.abs(v - referenceAudit.bounds.max[i]))) / Math.max(...referenceAudit.bounds.size, 1e-9) * 100,
+      qualityAccepted: outputAudit.valid,
+    },
   };
 }

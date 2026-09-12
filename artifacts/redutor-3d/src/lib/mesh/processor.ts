@@ -57,6 +57,7 @@ export function createMeshProcessor() {
         preserveBorders: options.preserveBorders,
         preserveSilhouette: options.preserveSilhouette,
         protectDetails: options.protectDetails,
+        timeBudgetMs: options.timeBudgetMs ?? 55_000,
       };
       worker.postMessage(request, [buffer]);
     },

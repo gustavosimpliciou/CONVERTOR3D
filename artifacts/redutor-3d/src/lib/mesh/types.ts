@@ -37,6 +37,8 @@ export interface SimplifyOptions {
   preserveBorders: boolean;
   preserveSilhouette: boolean;
   protectDetails: boolean;
+  timeBudgetMs?: number;
+  onCheckpoint?: (activeTriangles: number) => boolean;
 }
 
 export interface SimplifyResult {
@@ -46,6 +48,16 @@ export interface SimplifyResult {
   vertices: number;
   reductionPercent: number;
   warnings: string[];
+  stoppedSafely: boolean;
+  elapsedMs: number;
+  validation: {
+    watertight: boolean;
+    boundaryLoops: number;
+    nonManifoldEdges: number;
+    volumeDeltaPercent: number;
+    boundsDeltaPercent: number;
+    qualityAccepted: boolean;
+  };
 }
 
 export interface BinaryStlResult {
@@ -65,6 +77,7 @@ export interface WorkerRequest {
   preserveBorders: boolean;
   preserveSilhouette: boolean;
   protectDetails: boolean;
+  timeBudgetMs?: number;
 }
 
 export type WorkerProgressPhase =
@@ -80,6 +93,9 @@ export interface WorkerProgress {
   progress: number;
   message: string;
   stats?: MeshStats;
+  elapsedMs?: number;
+  originalTriangles?: number;
+  targetTriangles?: number;
 }
 
 export interface WorkerSuccess {
@@ -90,6 +106,7 @@ export interface WorkerSuccess {
   positions: Float32Array;
   indices: Uint32Array;
   warnings: string[];
+  validation: SimplifyResult['validation'];
   format: MeshFormat;
 }
 
