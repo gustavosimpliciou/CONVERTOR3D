@@ -41,8 +41,9 @@ import {
   triangleAspect,
   validateResultTriangles,
 } from './safeguards';
+import { healSurface, type HealingStats } from './surface-healing';
 import type { TriangleValidationStats } from './safeguards';
-import type { MeshData, ReductionProfile, SimplifyOptions, SimplifyResult } from './types';
+import type { HealingSummary, MeshData, ReductionProfile, SimplifyOptions, SimplifyResult } from './types';
 
 type Quadric = [number, number, number, number, number, number, number, number, number, number];
 
@@ -235,7 +236,11 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
   let curProfile: ReductionProfile | undefined = options.profile;
   const timedOut = (): boolean => performance.now() >= deadline;
   // Métricas do último estágio validado (para o relatório final).
-  const lastMetrics = { mean: 0, max: 0, silhouette: 0, normal: 0, curvature: 0 };
+  const lastMetrics = { mean: 0, max: 0, rms: 0, silhouette: 0, normal: 0, curvature: 0 };
+  const runHealing: HealingSummary = {
+    defectsFound: 0, defectsRepaired: 0, defectsRolledBack: 0,
+    facesAdded: 0, timeMs: 0, log: [],
+  };
   let stoppedReason: 'target' | 'quality' | 'time' | 'stall' = 'target';
   let escalations = 0;
   let stagesCompleted = 0;
@@ -294,6 +299,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
         commits,
         meanError: lastMetrics.mean,
         maxError: lastMetrics.max,
+        rmsError: lastMetrics.rms,
         silhouetteError: lastMetrics.silhouette,
         normalError: lastMetrics.normal,
         curvatureError: lastMetrics.curvature,
@@ -306,6 +312,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
         stoppedReason,
         escalations,
         effectiveProfile: curProfile ?? undefined,
+        healing: runHealing,
       },
     };
   };
@@ -325,6 +332,11 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
   const triAlive = new Uint8Array(originalTriangles).fill(1);
   const vertAlive = new Uint8Array(vertexCount).fill(1);
   const vertVersion = new Uint32Array(vertexCount);
+  // Pilhas de slots livres (vértices/faces mortos reaproveitáveis pelo healing).
+  const freeVerts: number[] = [];
+  const freeFaces: number[] = [];
+  // Vértices criados pelo healing (sem referência original: deriva isotrópica).
+  const patchedVerts = new Set<number>();
   const quadrics: Quadric[] = Array.from({ length: vertexCount }, emptyQuadric);
   const faceNormals = new Float64Array(originalTriangles * 3);
   const vertFaces: Array<number[]> = Array.from({ length: vertexCount }, () => []);
@@ -334,9 +346,18 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
 
   const getVertex = (index: number): [number, number, number] => [pos[index * 3], pos[index * 3 + 1], pos[index * 3 + 2]];
 
+  // Contador incremental EXATO de arestas de borda (base do early-out do
+  // healing: colapsos preservam a contagem — provado pela atualização
+  // incremental simétrica — então contagem igual à referência ⇒ sem
+  // buracos novos, sem escanear o mapa).
+  let liveBoundaryEdges = 0;
+
   const addEdge = (a: number, b: number, face: number): void => {
     const key = edgeKeyOf(a, b);
-    edgeCounts.set(key, (edgeCounts.get(key) ?? 0) + 1);
+    const prev = edgeCounts.get(key) ?? 0;
+    edgeCounts.set(key, prev + 1);
+    if (prev === 0) liveBoundaryEdges += 1;
+    else if (prev === 1) liveBoundaryEdges -= 1;
     let list = edgeFaces.get(key);
     if (!list) {
       list = [];
@@ -360,8 +381,10 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     if (count <= 1 || (list && list.length === 0)) {
       edgeCounts.delete(key);
       edgeFaces.delete(key);
+      if (count === 1) liveBoundaryEdges -= 1;
     } else {
       edgeCounts.set(key, count - 1);
+      if (count === 2) liveBoundaryEdges += 1;
     }
   };
 
@@ -461,6 +484,16 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     const r2 = complexity.region[tri[t * 3 + 2]] ?? 0;
     regionInitial[Math.max(r0, r1, r2)] += 1;
   }
+  // Bordas da referência (conjunto pequeno — só o que já era abertura).
+  const refBoundary = new Set<string>();
+  for (const [key, count] of edgeCounts) {
+    if (count === 1) refBoundary.add(key);
+  }
+  const refBoundaryCount = refBoundary.size;
+  // Colapsos preservam a contagem de borda (atualização incremental
+  // simétrica); só patch/undo a altera. Depois do primeiro patch, o
+  // early-out abaixo é desativado para o resto da execução.
+  let healingTouched = false;
   const qemScale = Math.max(complexity.avgFaceArea, 1e-24);
   onProgress?.(0.02);
 
@@ -605,6 +638,11 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     const oy = mesh.positions[vertex * 3 + 1];
     const oz = mesh.positions[vertex * 3 + 2];
     const dx = cx - ox; const dy = cy - oy; const dz = cz - oz;
+    // Vértices de patch (sem referência original): limite isotrópico pela
+    // aresta local atual; nasceram SOBRE a referência, então o teto é folga.
+    if (patchedVerts.has(vertex)) {
+      return Math.hypot(dx, dy, dz) <= Math.max(localEdgeLength(vertex), complexity.avgEdgeLength, 1e-12) * 1.5 + driftCapNormalBase;
+    }
     const region = complexity.region[vertex] ?? RegionClass.Plana;
     if (region === RegionClass.FeatureCritica || region === RegionClass.MicroDetalhe || complexity.locked[vertex] === 1) {
       // Em arestas vivas a normal média é diagonal à superfície real: um
@@ -875,6 +913,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     vertAlive[b] = 0;
     vertVersion[a] += 1;
     vertVersion[b] += 1;
+    freeVerts.push(b);
     // Herda a importância máxima (feature nunca é esquecida ao fundir).
     if ((complexity.feature[b] ?? 0) > (complexity.feature[a] ?? 0)) complexity.feature[a] = complexity.feature[b] ?? 0;
     if ((complexity.curvature[b] ?? 0) > (complexity.curvature[a] ?? 0)) complexity.curvature[a] = complexity.curvature[b] ?? 0;
@@ -893,6 +932,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       if (i0 === i1 || i1 === i2 || i0 === i2) {
         triAlive[f] = 0;
         removedFaces += 1;
+        freeFaces.push(f);
         // Contabiliza a cota da região que pagou por este colapso.
         const r0 = complexity.region[tri[f * 3]] ?? 0;
         const r1 = complexity.region[tri[f * 3 + 1]] ?? 0;
@@ -1064,6 +1104,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     reasons: string[];
     mean: number;
     max: number;
+    rms: number;
     silhouette: number;
     normal: number;
     curvature: number;
@@ -1079,11 +1120,11 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     };
     const audit = auditMesh(candidateMesh, referenceAudit);
     reasons.push(...audit.reasons);
-    if (!audit.valid) return { ok: false, kind: 'topology', reasons, mean: 0, max: 0, silhouette: 0, normal: 0, curvature: 0 };
+    if (!audit.valid) return { ok: false, kind: 'topology', reasons, mean: 0, max: 0, rms: 0, silhouette: 0, normal: 0, curvature: 0 };
     const tolForVolume = curProfile ? P.bndMax / 100 : 0.025;
     if (!auditWithinTolerance(audit, referenceAudit, tolForVolume)) {
       reasons.push('Volume ou dimensões excederam a tolerância do estágio.');
-      return { ok: false, kind: 'metric', reasons, mean: 0, max: 0, silhouette: 0, normal: 0, curvature: 0 };
+      return { ok: false, kind: 'metric', reasons, mean: 0, max: 0, rms: 0, silhouette: 0, normal: 0, curvature: 0 };
     }
     // Superfície: vértices candidatos → grade estática da referência.
     const candVerts = candidate.positions.length / 3;
@@ -1113,7 +1154,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       ok = false;
       reasons.push(`Erro de curvatura ${(curv.mean * 100).toFixed(3)} excedeu o limite.`);
     }
-    return { ok, kind: 'metric', reasons, mean: err.mean, max: err.max, silhouette: sil, normal: norm.mean, curvature: curv.mean };
+    return { ok, kind: 'metric', reasons, mean: err.mean, max: err.max, rms: err.rms, silhouette: sil, normal: norm.mean, curvature: curv.mean };
   };
 
   /** Recalcula normais das faces (consistência após reparo local). */
@@ -1160,6 +1201,80 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
 
   let qualityBlocked = false;
 
+  // Adaptador do healing sobre as estruturas vivas do engine.
+  const healingAdapter = {
+    pos, tri, triAlive, vertAlive, vertexCount, vertFaces, faceNormals,
+    liveEdges: edgeCounts,
+    allocVertex: (): number => {
+      while (freeVerts.length > 0) {
+        const v = freeVerts.pop() as number;
+        if (vertAlive[v]) continue;
+        vertAlive[v] = 1;
+        vertVersion[v] += 1;
+        vertFaces[v].length = 0;
+        quadrics[v] = emptyQuadric();
+        patchedVerts.add(v);
+        initVar[v] = 0;
+        return v;
+      }
+      return -1;
+    },
+    allocFace: (): number => {
+      while (freeFaces.length > 0) {
+        const f = freeFaces.pop() as number;
+        if (triAlive[f]) continue;
+        triAlive[f] = 1;
+        return f;
+      }
+      return -1;
+    },
+    releaseVertex: (v: number): void => {
+      vertAlive[v] = 0;
+      vertFaces[v].length = 0;
+      patchedVerts.delete(v);
+      freeVerts.push(v);
+    },
+    releaseFace: (f: number): void => {
+      triAlive[f] = 0;
+      freeFaces.push(f);
+    },
+    resetQuadric: (v: number): void => {
+      quadrics[v] = emptyQuadric();
+    },
+    inheritRegion: (v: number, neighbors: number[]): void => {
+      let r = 0; let feat = 0; let curv = 0; let thin = 0; let sil = 0; let lock = 0;
+      for (const o of neighbors) {
+        if ((complexity.region[o] ?? 0) > r) r = complexity.region[o] ?? 0;
+        if ((complexity.feature[o] ?? 0) > feat) feat = complexity.feature[o] ?? 0;
+        if ((complexity.curvature[o] ?? 0) > curv) curv = complexity.curvature[o] ?? 0;
+        if ((complexity.thin[o] ?? 0) > thin) thin = complexity.thin[o] ?? 0;
+        if ((complexity.silhouette[o] ?? 0) > sil) sil = complexity.silhouette[o] ?? 0;
+        if (complexity.locked[o] === 1) lock = 1;
+      }
+      complexity.region[v] = r;
+      complexity.feature[v] = feat;
+      complexity.curvature[v] = curv;
+      complexity.thin[v] = thin;
+      complexity.silhouette[v] = sil;
+      complexity.locked[v] = lock;
+      initLocalEdge[v] = complexity.avgEdgeLength;
+    },
+    bumpVertex: (v: number): void => {
+      vertVersion[v] += 1;
+    },
+    addEdge,
+    removeEdge,
+  };
+
+  const mergeHealing = (stats: HealingStats): void => {
+    runHealing.defectsFound += stats.defectsFound;
+    runHealing.defectsRepaired += stats.defectsRepaired;
+    runHealing.defectsRolledBack += stats.defectsRolledBack;
+    runHealing.facesAdded += stats.facesAdded;
+    runHealing.timeMs += stats.timeMs;
+    runHealing.log.push(...stats.log);
+  };
+
   for (let stage = 0; stage < totalStages; stage += 1) {
     const stageTarget = targets[stage];
     let attempts = 0;
@@ -1197,15 +1312,52 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
         break;
       }
 
+      // RECONSTRUÇÃO DE SUPERFÍCIE: detecta buracos novos e tenta patch
+      // curvo guiado pelo original (com rollback e orçamento). Roda antes
+      // da validação para que o estágio já inclua o healing. Early-out
+      // exato: sem patch anterior e contagem igual à referência, colapsos
+      // não criaram buracos (prova pela atualização incremental simétrica).
+      const healBudget = Math.max(24, Math.floor(Math.max(0, stageStartActive - activeTriangles) * 0.05));
+      const healed = !healingTouched && liveBoundaryEdges === refBoundaryCount
+        ? { stats: { defectsFound: 0, defectsRepaired: 0, defectsRolledBack: 0, facesAdded: 0, timeMs: 0, log: [] }, undo: (): void => undefined }
+        : healSurface(
+          healingAdapter,
+          { grid: refGrid, diagonal, refBoundary },
+          { maxDefects: 8, faceBudget: healBudget, maxLoopEdges: 10 },
+        );
+      if (healed.stats.facesAdded > 0) healingTouched = true;
+      mergeHealing(healed.stats);
+      if (healed.stats.defectsRepaired > 0) {
+        activeTriangles += healed.stats.facesAdded;
+      }
+
       // Valida o estágio; em falha métrica, tenta reparo local uma vez.
       const dbgStage = (globalThis as Record<string, unknown>).__MESH_DEBUG as Record<string, number> | undefined;
       if (dbgStage) {
         dbgStage[`stage-${stage}-active`] = activeTriangles;
         dbgStage[`stage-${stage}-heap`] = heap.size;
         dbgStage[`stage-${stage}-iters`] = iterations;
+        dbgStage[`stage-${stage}-healed`] = healed.stats.facesAdded;
       }
-      const compact = buildCompact();
+      let compact = buildCompact();
       let check = validateStage(compact);
+      if (!check.ok && healed.stats.facesAdded > 0) {
+        // O patch pode ter quebrado a validação: desfaz tudo e revalida o
+        // estado puro dos colapsos antes de decidir o destino do estágio.
+        healed.undo();
+        for (const entry of healed.stats.log) {
+          if (!entry.rolledBack) {
+            entry.rolledBack = true;
+            entry.reason = 'revalidação do estágio reprovou com patch';
+            runHealing.defectsRepaired -= 1;
+            runHealing.defectsRolledBack += 1;
+            runHealing.facesAdded -= entry.facesAdded;
+          }
+        }
+        activeTriangles -= healed.stats.facesAdded;
+        compact = buildCompact();
+        check = validateStage(compact);
+      }
       if (!check.ok && check.kind === 'metric' && attempts === 0) {
         if (attemptRepair()) {
           const recheck = validateStage(buildCompact());
@@ -1222,6 +1374,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
         stagesCompleted += 1;
         lastMetrics.mean = check.mean;
         lastMetrics.max = check.max;
+        lastMetrics.rms = check.rms;
         lastMetrics.silhouette = check.silhouette;
         lastMetrics.normal = check.normal;
         lastMetrics.curvature = check.curvature;
@@ -1322,6 +1475,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       bestValid = { positions: compact.positions, indices: compact.indices, triangles: compact.indices.length / 3 };
       lastMetrics.mean = check.mean;
       lastMetrics.max = check.max;
+      lastMetrics.rms = check.rms;
       lastMetrics.silhouette = check.silhouette;
       lastMetrics.normal = check.normal;
       lastMetrics.curvature = check.curvature;
@@ -1335,6 +1489,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       bestValid = { positions: compact.positions, indices: compact.indices, triangles: compact.indices.length / 3 };
       lastMetrics.mean = polished.mean;
       lastMetrics.max = polished.max;
+      lastMetrics.rms = polished.rms;
       lastMetrics.silhouette = polished.silhouette;
       lastMetrics.normal = polished.normal;
       lastMetrics.curvature = polished.curvature;

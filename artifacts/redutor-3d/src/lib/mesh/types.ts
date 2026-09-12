@@ -58,12 +58,34 @@ export interface SimplifyOptions {
   limits?: ReductionLimits;
 }
 
+export interface HealingLogEntry {
+  kind: string;
+  center: [number, number, number];
+  size: number;
+  facesAdded: number;
+  errorBefore: number;
+  errorAfter: number;
+  timeMs: number;
+  rolledBack: boolean;
+  reason?: string;
+}
+
+export interface HealingSummary {
+  defectsFound: number;
+  defectsRepaired: number;
+  defectsRolledBack: number;
+  facesAdded: number;
+  timeMs: number;
+  log: HealingLogEntry[];
+}
+
 /** Relatório de qualidade da redução (números reais do arquivo produzido). */
 export interface SimplifyReport {
   stages: number;
   commits: number;
   meanError: number;
   maxError: number;
+  rmsError: number;
   silhouetteError: number;
   normalError: number;
   curvatureError: number;
@@ -76,6 +98,7 @@ export interface SimplifyReport {
   stoppedReason: 'target' | 'quality' | 'time' | 'stall';
   escalations: number;
   effectiveProfile?: ReductionProfile;
+  healing: HealingSummary;
 }
 
 export interface SimplifyResult {
@@ -122,7 +145,7 @@ export interface ImportTopology {
 }
 
 /** Versão do protocolo worker↔UI. UI rejeita respostas com protocolo diferente. */
-export const MESH_PROTOCOL = 5;
+export const MESH_PROTOCOL = 6;
 
 export interface ImportSuccess {
   type: 'complete';

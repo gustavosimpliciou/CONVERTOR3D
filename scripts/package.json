@@ -10,6 +10,7 @@
     "validate:stl-delivery": "tsx ./src/validate-stldelivery.ts",
     "validate:reduction": "tsx ./src/validate-reduction.ts",
     "validate:upload": "tsx ./src/validate-upload.ts",
+    "validate:healing": "tsx ./src/validate-healing.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {

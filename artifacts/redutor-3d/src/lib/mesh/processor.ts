@@ -52,6 +52,7 @@ export function ensureReport(report: SimplifyReport | undefined | null): Simplif
     commits: 0,
     meanError: 0,
     maxError: 0,
+    rmsError: 0,
     silhouetteError: 0,
     normalError: 0,
     curvatureError: 0,
@@ -63,6 +64,14 @@ export function ensureReport(report: SimplifyReport | undefined | null): Simplif
     degenerateTriangles: 0,
     stoppedReason: 'stall',
     escalations: 0,
+    healing: {
+      defectsFound: 0,
+      defectsRepaired: 0,
+      defectsRolledBack: 0,
+      facesAdded: 0,
+      timeMs: 0,
+      log: [],
+    },
   };
 }
 

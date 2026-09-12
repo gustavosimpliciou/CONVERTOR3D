@@ -748,6 +748,8 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
             <MetaLine label="Redução de faces" value={`${formatCount(model.stats.triangles)} → ${formatCount(reduced.stats.triangles)}`} />
             <MetaLine label="Erro geométrico médio" value={`${(reduced.report.meanError * 100).toFixed(3)}%`} />
             <MetaLine label="Erro geométrico máximo" value={`${(reduced.report.maxError * 100).toFixed(3)}%`} />
+            <MetaLine label="Erro RMS" value={`${((reduced.report.rmsError ?? 0) * 100).toFixed(3)}%`} />
+            <MetaLine label="Reconstrução" value={(() => { const h = reduced.report.healing; if (!h || h.defectsFound === 0) return 'sem defeitos'; return `${h.defectsRepaired} corrigidos · ${h.facesAdded} faces`; })()} accent />
             <MetaLine label="Erro de silhueta" value={`${(reduced.report.silhouetteError * 100).toFixed(2)}% ${silOk ? '· PASS' : '· REVISAR'}`} />
             <MetaLine label="Erro de normal" value={reduced.report.normalError.toFixed(4)} />
             <MetaLine label="Erro de curvatura" value={reduced.report.curvatureError.toFixed(4)} />

@@ -547,20 +547,86 @@ export function directedSamplesError(
   alive: Uint8Array | null,
   diagonal: number,
   samples = 1200,
-): { mean: number; max: number } {
+): { mean: number; max: number; rms: number } {
   const count = Math.min(samples, vertexCount);
-  if (count === 0 || diagonal <= 0) return { mean: 0, max: 0 };
+  if (count === 0 || diagonal <= 0) return { mean: 0, max: 0, rms: 0 };
   const stride = Math.max(1, Math.floor(vertexCount / count));
-  let sum = 0; let max = 0; let taken = 0;
+  let sum = 0; let sumSq = 0; let max = 0; let taken = 0;
   for (let v = 0; v < vertexCount && taken < count; v += stride) {
     if (alive && !alive[v]) continue;
     const q = queryGridClosest(grid, positions[v * 3], positions[v * 3 + 1], positions[v * 3 + 2]);
     const dist = Math.sqrt(q.dist2) / diagonal;
     sum += dist;
+    sumSq += dist * dist;
     if (dist > max) max = dist;
     taken += 1;
   }
-  return { mean: taken > 0 ? sum / taken : 0, max };
+  return { mean: taken > 0 ? sum / taken : 0, max, rms: taken > 0 ? Math.sqrt(sumSq / taken) : 0 };
+}
+
+/**
+ * Interseção triângulo-triângulo (Möller, só booleano — para validar que um
+ * patch não atravessa a vizinhança). Barato para checagens locais.
+ */
+export function trianglesIntersect(
+  a0: number, a1: number, a2: number, b0: number, b1: number, b2: number,
+  c0: number, c1: number, c2: number, d0: number, d1: number, d2: number,
+  e0: number, e1: number, e2: number, f0: number, f1: number, f2: number,
+): boolean {
+  // Eixo de separação: normais dos dois triângulos + 9 produtos vetoriais.
+  const ux = b0 - a0; const uy = b1 - a1; const uz = b2 - a2;
+  const vx = c0 - a0; const vy = c1 - a1; const vz = c2 - a2;
+  let nx = uy * vz - uz * vy; let ny = uz * vx - ux * vz; let nz = ux * vy - uy * vx;
+  const nl = Math.hypot(nx, ny, nz);
+  if (nl < 1e-24) return false;
+  nx /= nl; ny /= nl; nz /= nl;
+  const da = nx * a0 + ny * a1 + nz * a2;
+  const db0 = nx * d0 + ny * d1 + nz * d2 - da;
+  const db1 = nx * e0 + ny * e1 + nz * e2 - da;
+  const db2 = nx * f0 + ny * f1 + nz * f2 - da;
+  if ((db0 > 0 && db1 > 0 && db2 > 0) || (db0 < 0 && db1 < 0 && db2 < 0)) return false;
+  const px = e0 - d0; const py = e1 - d1; const pz = e2 - d2;
+  const qx = f0 - d0; const qy = f1 - d1; const qz = f2 - d2;
+  let mx = py * qz - pz * qy; let my = pz * qx - px * qz; let mz = px * qy - py * qx;
+  const ml = Math.hypot(mx, my, mz);
+  if (ml < 1e-24) return false;
+  mx /= ml; my /= ml; mz /= ml;
+  const dd = mx * d0 + my * d1 + mz * d2;
+  const da0 = mx * a0 + my * a1 + mz * a2 - dd;
+  const da1 = mx * b0 + my * b1 + mz * b2 - dd;
+  const da2 = mx * c0 + my * c1 + mz * c2 - dd;
+  if ((da0 > 0 && da1 > 0 && da2 > 0) || (da0 < 0 && da1 < 0 && da2 < 0)) return false;
+  // Sem eixo de separação entre as normais: teste das 9 arestas cruzadas.
+  const edgesA: Array<[number, number, number]> = [[ux, uy, uz], [vx, vy, vz], [ax(c0, b0), ax(c1, b1), ax(c2, b2)]];
+  const edgesB: Array<[number, number, number]> = [[px, py, pz], [qx, qy, qz], [ax(f0, e0), ax(f1, e1), ax(f2, e2)]];
+  const vertsA: Array<[number, number, number]> = [[a0, a1, a2], [b0, b1, b2], [c0, c1, c2]];
+  const vertsB: Array<[number, number, number]> = [[d0, d1, d2], [e0, e1, e2], [f0, f1, f2]];
+  for (const [ex, ey, ez] of edgesA) {
+    for (const [fx, fy, fz] of edgesB) {
+      let sx = ey * fz - ez * fy; let sy = ez * fx - ex * fz; let sz = ex * fy - ey * fx;
+      const sl = Math.hypot(sx, sy, sz);
+      if (sl < 1e-24) continue;
+      sx /= sl; sy /= sl; sz /= sl;
+      let mna = Infinity; let mxa = -Infinity;
+      for (const [ox, oy, oz] of vertsA) {
+        const p = ox * sx + oy * sy + oz * sz;
+        if (p < mna) mna = p;
+        if (p > mxa) mxa = p;
+      }
+      let mnb = Infinity; let mxb = -Infinity;
+      for (const [ox, oy, oz] of vertsB) {
+        const p = ox * sx + oy * sy + oz * sz;
+        if (p < mnb) mnb = p;
+        if (p > mxb) mxb = p;
+      }
+      if (mxa < mnb || mxb < mna) return false;
+    }
+  }
+  return true;
+}
+
+function ax(a: number, b: number): number {
+  return a - b;
 }
 
 const SILHOUETTE_VIEWS: Array<[number, number, number]> = [

@@ -15,6 +15,8 @@ Uma ferramenta local com dois modos: **Compressor Lossless** (fluxo principal �
 - `pnpm --filter @workspace/scripts run validate:decimation` — testes de regressão do redutor (19 checks)
 - `pnpm --filter @workspace/scripts run validate:reduction` — testes da redução adaptativa (27 checks, inclui end-to-end no STL real de 1,5M faces)
 - `pnpm --filter @workspace/scripts run validate:upload` — testes do fluxo de upload (24 checks: binário/ASCII, truncado, vazio, malha aberta aceita, erros específicos, protocolo worker, timeout dimensionado)
+- `pnpm --filter @workspace/scripts run validate:healing` — testes da reconstrução de superfície (13 checks: detecção, patch curvo, original ignorado, recusa honesta, rollback, budget, RMS, interseção)
+- MODO 2 (healing, `src/lib/mesh/surface-healing.ts`): etapa pós-compressão que detecta buracos NOVOS (borda viva fora da referência), classifica (hole ≤10 arestas / tear), reconstrói INTELLIGENT CURVED CAP (centroide projetado no original, fan orientado, gates locais, anti-interseção) com rollback exato e REPAIR FACE BUDGET; loops grandes recusados; early-out por contador incremental de borda. Log por defeito no relatório.
 - Robustez de upload: `src/lib/mesh/stl-import.ts` (parse sem three.js) + worker com requests `import`/`process` separados + protocolo `MESH_PROTOCOL` (rejeita worker em cache desatualizado) + watchdog anti-hang com timeout por tamanho + try/catch em todos os fluxos async + leituras defensivas (nenhum campo ausente quebra a tela). Todo `App.tsx` passa em typecheck strict (inclui checagem de bindings — um `export...from` sem vínculo local já causou `ReferenceError` em produção uma vez).
 - Required env: `DATABASE_URL` — Postgres connection string
 
