@@ -25,7 +25,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import NotFound from '@/pages/not-found';
 import { Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
 import { buildStats } from './lib/mesh/geometry';
-import { checkProtocol, createMeshProcessor, downloadStl, ensureReport, importTimeoutMs, isZeroReductionError, STALE_WORKER_MESSAGE } from './lib/mesh/processor';
+import { checkProtocol, createMeshProcessor, downloadStl, ensureReport, importTimeoutMs, isZeroReductionError, STALE_WORKER_MESSAGE, targetFacesForSize } from './lib/mesh/processor';
 import { createCompressor, downloadBytes } from './lib/compress/processor';
 import { packGzip } from './lib/compress/container';
 import type { MeshData, MeshStats, Quality, WorkerSuccess } from './lib/mesh/types';
@@ -216,6 +216,32 @@ type UnpackResult = {
   fileName: string;
   format: string;
   faces: number;
+  elapsedMs: number;
+};
+
+type CompressPhase = 'empty' | 'analyzing' | 'ready' | 'compressing' | 'done' | 'error';
+
+type OptimizeDelivery = {
+  stl: ArrayBuffer;
+  fileName: string;
+  gzip: ArrayBuffer;
+  gzipFileName: string;
+  method: string;
+  methodLabel: string;
+  tier: 'A' | 'B';
+  format: string;
+  originalBytes: number;
+  deliveredBytes: number;
+  ratio: number;
+  faces: number;
+  validation: string;
+  checks: Record<string, boolean>;
+  warnings: string[];
+  meanError: number;
+  maxError: number;
+  volumeDeltaPercent: number;
+  boundaryOriginal: number;
+  boundaryFinal: number;
   elapsedMs: number;
 };
 
@@ -489,8 +515,7 @@ const PROFILE_SIL_LIMIT: Record<ReductionProfile, number> = {
   maximum: 0.07,
 };
 
-/** Meta % do TAMANHO → alvo de faces (STL binário: 84 + 50 bytes/face). */
-export { targetFacesForSize } from './lib/mesh/processor';
+
 
 function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void }) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -553,8 +578,8 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
           setMessage(event.data.message.replace('…', '')); setElapsedMs(event.data.elapsedMs ?? 0);
         } else if (event.type === 'complete') {
           const data = event.data;
-          if (data.job === 'import') {
-            if (!checkProtocol((data as { protocol?: unknown }).protocol) || !data.positions || !data.indices || !data.stats || !data.topology) {
+          if ('job' in data && data.job === 'import') {
+            if (!checkProtocol(data.protocol) || !data.positions || !data.indices || !data.stats || !data.topology) {
               setError(STALE_WORKER_MESSAGE); setPhase('error'); setProgress(0);
             } else {
               const imported: MeshData = { positions: data.positions, indices: data.indices, format: data.format, bounds: data.stats.bounds };

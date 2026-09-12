@@ -15,7 +15,7 @@ Uma ferramenta local com dois modos: **Compressor Lossless** (fluxo principal �
 - `pnpm --filter @workspace/scripts run validate:decimation` — testes de regressão do redutor (19 checks)
 - `pnpm --filter @workspace/scripts run validate:reduction` — testes da redução adaptativa (27 checks, inclui end-to-end no STL real de 1,5M faces)
 - `pnpm --filter @workspace/scripts run validate:upload` — testes do fluxo de upload (24 checks: binário/ASCII, truncado, vazio, malha aberta aceita, erros específicos, protocolo worker, timeout dimensionado)
-- Robustez de upload: `src/lib/mesh/stl-import.ts` (parse sem three.js) + worker com requests `import`/`process` separados + protocolo `MESH_PROTOCOL` (rejeita worker em cache desatualizado) + watchdog anti-hang com timeout por tamanho + try/catch em todos os fluxos async + leituras defensivas (nenhum campo ausente quebra a tela).
+- Robustez de upload: `src/lib/mesh/stl-import.ts` (parse sem three.js) + worker com requests `import`/`process` separados + protocolo `MESH_PROTOCOL` (rejeita worker em cache desatualizado) + watchdog anti-hang com timeout por tamanho + try/catch em todos os fluxos async + leituras defensivas (nenhum campo ausente quebra a tela). Todo `App.tsx` passa em typecheck strict (inclui checagem de bindings — um `export...from` sem vínculo local já causou `ReferenceError` em produção uma vez).
 - Required env: `DATABASE_URL` — Postgres connection string
 
 ## Netlify
