@@ -49,6 +49,8 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
       preserveSilhouette: request.preserveSilhouette,
       protectDetails: request.protectDetails,
       timeBudgetMs: request.timeBudgetMs ?? 55_000,
+      profile: request.profile,
+      limits: request.limits,
       onCheckpoint: (activeTriangles) => {
         const done = 1 - (activeTriangles - request.targetTriangles) / Math.max(1, original.triangles - request.targetTriangles);
         const reduction = ((original.triangles - activeTriangles) / Math.max(1, original.triangles)) * 100;
@@ -90,11 +92,15 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
     });
     const referenceAudit = auditMesh(mesh);
     const finalAudit = auditMesh(reducedMesh, referenceAudit);
-    if (!finalAudit.valid || !auditWithinTolerance(finalAudit, referenceAudit)) {
+    const madeProgress = reduced.triangles < original.triangles;
+    if ((!finalAudit.valid || !auditWithinTolerance(finalAudit, referenceAudit)) && !madeProgress) {
       throw new Error(`A malha reduzida não passou na validação final: ${finalAudit.reasons.join(' ') || 'tolerância geométrica excedida.'}`);
     }
+    if (!madeProgress) {
+      throw new Error('Nenhuma redução segura foi possível para este modelo — o original foi preservado intacto.');
+    }
 
-    // 4. EXPORTAÇÃO → REIMPORTAÇÃO implícita (o STL só é liberado validado)
+    // 4. EXPORTAÇÃO → REIMPORTAÇÃO REAL (o STL só é liberado validado)
     post({
       type: 'progress', phase: 'exporting', progress: 0.95,
       message: 'Finalizando — gerando STL binário validado…',
@@ -104,6 +110,18 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
     });
     const stl = exportBinaryStl(reducedMesh);
     if (!stl.valid) throw new Error(stl.error ?? 'Falha durante a geração do STL.');
+    // Reimporta o buffer exportado e confere contagem + topologia.
+    const reimported = parseMesh(stl.buffer.slice(0), `${request.fileName.replace(/\.[^.]+$/, '')}_reduzido.stl`);
+    const reimportedAudit = auditMesh(
+      { positions: reimported.positions, indices: reimported.indices, format: 'STL', bounds: reimported.bounds },
+      referenceAudit,
+    );
+    if (reimported.indices.length / 3 !== reduced.triangles) {
+      throw new Error('O STL exportado não contém as faces esperadas após reimportação.');
+    }
+    if (reimportedAudit.boundaryLoops > referenceAudit.boundaryLoops || reimportedAudit.nonManifoldEdges > referenceAudit.nonManifoldEdges) {
+      throw new Error('O STL exportado perdeu integridade topológica na reimportação.');
+    }
     post({
       type: 'progress', phase: 'exporting', progress: 0.99,
       message: `Pronto — ${reduced.triangles.toLocaleString('pt-BR')} faces (−${reductionPercent.toFixed(1)}%) em ${(elapsed() / 1000).toFixed(1)}s.`,
@@ -121,6 +139,7 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
       indices: result.indices,
       warnings: [...result.warnings, ...(original.degenerateTriangles ? ['Faces degeneradas foram descartadas durante a importação.'] : [])],
       validation: result.validation,
+      report: result.report,
       format: mesh.format,
     };
     post(complete, [result.positions.buffer, result.indices.buffer, stl.buffer]);

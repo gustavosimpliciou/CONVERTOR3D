@@ -15,23 +15,56 @@ export type TopologyAudit = {
   reasons: string[];
 };
 
+/**
+ * Chaves de aresta NUMÉRICAS (rápidas) quando V < 2^21, strings exatas caso
+ * contrário. key = min * STRIDE + max é exata em double até 2^53.
+ */
+const EDGE_STRIDE = 2097152;
+
+function maxVertexId(mesh: MeshData): number {
+  let max = 0;
+  for (let i = 0; i < mesh.indices.length; i += 1) {
+    if (mesh.indices[i] > max) max = mesh.indices[i];
+  }
+  return max;
+}
+
+type EdgeKey = number | string;
+
+function edgeKey(u: number, v: number, numeric: boolean): EdgeKey {
+  const a = u < v ? u : v;
+  const b = u < v ? v : u;
+  return numeric ? a * EDGE_STRIDE + b : `${a}:${b}`;
+}
+
+function decodeEdgeKey(key: EdgeKey, numeric: boolean): [number, number] {
+  if (!numeric) {
+    const [a, b] = (key as string).split(':').map(Number);
+    return [a, b];
+  }
+  const n = key as number;
+  return [Math.floor(n / EDGE_STRIDE), n % EDGE_STRIDE];
+}
+
 function edgeMap(mesh: MeshData) {
-  const edges = new Map<string, number>();
+  const numeric = maxVertexId(mesh) < EDGE_STRIDE;
+  const edges = new Map<EdgeKey, number>();
   for (let i = 0; i < mesh.indices.length; i += 3) {
     const a = mesh.indices[i], b = mesh.indices[i + 1], c = mesh.indices[i + 2];
     for (const [u, v] of [[a, b], [b, c], [c, a]]) {
-      const key = u < v ? `${u}:${v}` : `${v}:${u}`;
+      const key = edgeKey(u, v, numeric);
       edges.set(key, (edges.get(key) ?? 0) + 1);
     }
   }
-  return edges;
+  return { edges, numeric };
 }
 
-function countBoundaryLoops(mesh: MeshData, edges: Map<string, number>) {
+function countBoundaryLoops(mesh: MeshData, edgeData: { edges: Map<EdgeKey, number>; numeric: boolean }) {
+  const { edges, numeric } = edgeData;
   const adjacency = new Map<number, Set<number>>();
   for (const [key, count] of edges) {
     if (count !== 1) continue;
-    const [a, b] = key.split(':').map(Number);
+    const [a, b] = decodeEdgeKey(key, numeric);
     if (!adjacency.has(a)) adjacency.set(a, new Set());
     if (!adjacency.has(b)) adjacency.set(b, new Set());
     adjacency.get(a)!.add(b);
@@ -54,12 +87,15 @@ function countBoundaryLoops(mesh: MeshData, edges: Map<string, number>) {
 }
 
 function countOrientationConflicts(mesh: MeshData) {
-  const directed = new Map<string, number>();
+  const numeric = maxVertexId(mesh) < EDGE_STRIDE;
+  const directed = new Map<EdgeKey, number>();
+  const directedKey = (u: number, v: number): EdgeKey =>
+    numeric ? u * EDGE_STRIDE + v : `${u}:${v}`;
   for (let i = 0; i < mesh.indices.length; i += 3) {
     const [a, b, c] = [mesh.indices[i], mesh.indices[i + 1], mesh.indices[i + 2]];
     for (const [u, v] of [[a, b], [b, c], [c, a]]) {
-      const forward = `${u}:${v}`;
-      const reverse = `${v}:${u}`;
+      const forward = directedKey(u, v);
+      const reverse = directedKey(v, u);
       directed.set(forward, (directed.get(forward) ?? 0) + 1);
       if ((directed.get(reverse) ?? 0) > 0) directed.set(reverse, (directed.get(reverse) ?? 0) - 1);
     }
@@ -109,8 +145,8 @@ function surfaceArea(mesh: MeshData) {
 export function auditMesh(mesh: MeshData, reference?: TopologyAudit): TopologyAudit {
   const stats: MeshStats = buildStats(mesh);
   const edges = edgeMap(mesh);
-  const boundaryEdges = [...edges.values()].filter((count) => count === 1).length;
-  const nonManifoldEdges = [...edges.values()].filter((count) => count > 2).length;
+  const boundaryEdges = [...edges.edges.values()].filter((count) => count === 1).length;
+  const nonManifoldEdges = [...edges.edges.values()].filter((count) => count > 2).length;
   const audit: TopologyAudit = {
     boundaryEdges,
     boundaryLoops: countBoundaryLoops(mesh, edges),

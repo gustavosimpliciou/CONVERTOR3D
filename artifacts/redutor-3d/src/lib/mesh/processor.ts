@@ -58,6 +58,8 @@ export function createMeshProcessor() {
         preserveSilhouette: options.preserveSilhouette,
         protectDetails: options.protectDetails,
         timeBudgetMs: options.timeBudgetMs ?? 55_000,
+        profile: options.profile,
+        limits: options.limits,
       };
       worker.postMessage(request, [buffer]);
     },
@@ -66,6 +68,15 @@ export function createMeshProcessor() {
       worker = undefined;
     },
   };
+}
+
+/**
+ * Meta % do TAMANHO → alvo de faces (STL binário: 84 + 50 bytes/face).
+ * Usa o tamanho REAL do arquivo, nunca estimativa fixa.
+ */
+export function targetFacesForSize(originalBytes: number, originalTriangles: number, percent: number): number {
+  const targetBytes = Math.max(84 + 4 * 50, (1 - percent / 100) * originalBytes);
+  return Math.max(4, Math.min(originalTriangles - 1, Math.floor((targetBytes - 84) / 50)));
 }
 
 export function meshDataFromSuccess(data: WorkerSuccess, format: MeshData['format']): MeshData {
@@ -81,7 +92,7 @@ export function downloadStl(buffer: ArrayBuffer, fileName: string) {
   const url = URL.createObjectURL(new Blob([buffer], { type: 'model/stl' }));
   const anchor = document.createElement('a');
   anchor.href = url;
-  anchor.download = fileName.replace(/\.[^.]+$/, '') + '_reduzido.stl';
+  anchor.download = fileName.replace(/\.[^.]+$/, '') + '_comprimido.stl';
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();

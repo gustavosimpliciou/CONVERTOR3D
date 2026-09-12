@@ -377,3 +377,250 @@ export function approximateSurfaceError(
   }
   return { mean: taken > 0 ? sum / taken : 0, max };
 }
+
+// ---------------------------------------------------------------------------
+// Grade triangular reutilizável (construída UMA vez sobre a referência)
+// ---------------------------------------------------------------------------
+
+export interface TriangleGrid {
+  cells: Map<string, number[]>;
+  cellsPerAxis: number;
+  cellSize: number;
+  minX: number;
+  minY: number;
+  minZ: number;
+  positions: Float64Array | Float32Array | number[];
+  indices: Uint32Array | number[] | Int32Array;
+  triCount: number;
+}
+
+/** Constroi a grade uma única vez (ex. sobre a malha ORIGINAL imutável). */
+export function buildTriangleGrid(
+  positions: Float64Array | Float32Array | number[],
+  indices: Uint32Array | number[] | Int32Array,
+): TriangleGrid {
+  const triCount = Math.floor(indices.length / 3);
+  let minX = Infinity; let minY = Infinity; let minZ = Infinity;
+  let maxX = -Infinity; let maxY = -Infinity; let maxZ = -Infinity;
+  for (let i = 0; i < positions.length; i += 3) {
+    if (positions[i] < minX) minX = positions[i];
+    if (positions[i + 1] < minY) minY = positions[i + 1];
+    if (positions[i + 2] < minZ) minZ = positions[i + 2];
+    if (positions[i] > maxX) maxX = positions[i];
+    if (positions[i + 1] > maxY) maxY = positions[i + 1];
+    if (positions[i + 2] > maxZ) maxZ = positions[i + 2];
+  }
+  const span = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 1e-12);
+  const cellsPerAxis = Math.max(4, Math.min(32, Math.round(Math.cbrt(Math.max(1, triCount) / 4))));
+  const cellSize = span / cellsPerAxis || span;
+  const cells = new Map<string, number[]>();
+  for (let t = 0; t < triCount; t += 1) {
+    const a = indices[t * 3] * 3; const b = indices[t * 3 + 1] * 3; const c = indices[t * 3 + 2] * 3;
+    if (a < 0 || b < 0 || c < 0) continue;
+    const tx0 = Math.min(positions[a], positions[b], positions[c]);
+    const ty0 = Math.min(positions[a + 1], positions[b + 1], positions[c + 1]);
+    const tz0 = Math.min(positions[a + 2], positions[b + 2], positions[c + 2]);
+    const tx1 = Math.max(positions[a], positions[b], positions[c]);
+    const ty1 = Math.max(positions[a + 1], positions[b + 1], positions[c + 1]);
+    const tz1 = Math.max(positions[a + 2], positions[b + 2], positions[c + 2]);
+    const x0 = Math.min(cellsPerAxis - 1, Math.max(0, Math.floor((tx0 - minX) / cellSize)));
+    const y0 = Math.min(cellsPerAxis - 1, Math.max(0, Math.floor((ty0 - minY) / cellSize)));
+    const z0 = Math.min(cellsPerAxis - 1, Math.max(0, Math.floor((tz0 - minZ) / cellSize)));
+    const x1 = Math.min(cellsPerAxis - 1, Math.floor((tx1 - minX) / cellSize));
+    const y1 = Math.min(cellsPerAxis - 1, Math.floor((ty1 - minY) / cellSize));
+    const z1 = Math.min(cellsPerAxis - 1, Math.floor((tz1 - minZ) / cellSize));
+    for (let x = x0; x <= x1; x += 1) {
+      for (let y = y0; y <= y1; y += 1) {
+        for (let z = z0; z <= z1; z += 1) {
+          const key = `${x}:${y}:${z}`;
+          let cell = cells.get(key);
+          if (!cell) { cell = []; cells.set(key, cell); }
+          cell.push(t);
+        }
+      }
+    }
+  }
+  return { cells, cellsPerAxis, cellSize, minX, minY, minZ, positions, indices, triCount };
+}
+
+/** Ponto mais próximo na malha da grade + distância² (para reparo local). */
+export function queryGridClosest(
+  grid: TriangleGrid,
+  px: number, py: number, pz: number,
+): { dist2: number; qx: number; qy: number; qz: number } {
+  const { cells, cellsPerAxis, cellSize, minX, minY, minZ, positions, indices } = grid;
+  const cx = Math.min(cellsPerAxis - 1, Math.max(0, Math.floor((px - minX) / cellSize)));
+  const cy = Math.min(cellsPerAxis - 1, Math.max(0, Math.floor((py - minY) / cellSize)));
+  const cz = Math.min(cellsPerAxis - 1, Math.max(0, Math.floor((pz - minZ) / cellSize)));
+  let best = Infinity;
+  let qx = px; let qy = py; let qz = pz;
+  for (let ring = 0; ring <= 3 && best === Infinity; ring += 1) {
+    for (let x = Math.max(0, cx - ring); x <= Math.min(cellsPerAxis - 1, cx + ring); x += 1) {
+      for (let y = Math.max(0, cy - ring); y <= Math.min(cellsPerAxis - 1, cy + ring); y += 1) {
+        for (let z = Math.max(0, cz - ring); z <= Math.min(cellsPerAxis - 1, cz + ring); z += 1) {
+          const cell = cells.get(`${x}:${y}:${z}`);
+          if (!cell) continue;
+          for (const tt of cell) {
+            const ia = indices[tt * 3] * 3; const ib = indices[tt * 3 + 1] * 3; const ic = indices[tt * 3 + 2] * 3;
+            const closest = pointTriangleClosest(
+              px, py, pz,
+              positions[ia], positions[ia + 1], positions[ia + 2],
+              positions[ib], positions[ib + 1], positions[ib + 2],
+              positions[ic], positions[ic + 1], positions[ic + 2],
+            );
+            if (closest.dist2 < best) {
+              best = closest.dist2;
+              qx = closest.qx; qy = closest.qy; qz = closest.qz;
+            }
+          }
+        }
+      }
+    }
+  }
+  return { dist2: best === Infinity ? 0 : best, qx, qy, qz };
+}
+
+/** Ponto mais próximo em um triângulo (RTCD, com coordenadas do ponto). */
+export function pointTriangleClosest(
+  px: number, py: number, pz: number,
+  ax: number, ay: number, az: number,
+  bx: number, by: number, bz: number,
+  cx: number, cy: number, cz: number,
+): { dist2: number; qx: number; qy: number; qz: number } {
+  const abx = bx - ax; const aby = by - ay; const abz = bz - az;
+  const acx = cx - ax; const acy = cy - ay; const acz = cz - az;
+  const apx = px - ax; const apy = py - ay; const apz = pz - az;
+  const d1 = abx * apx + aby * apy + abz * apz;
+  const d2 = acx * apx + acy * apy + acz * apz;
+  if (d1 <= 0 && d2 <= 0) return { dist2: apx * apx + apy * apy + apz * apz, qx: ax, qy: ay, qz: az };
+  const bpx = px - bx; const bpy = py - by; const bpz = pz - bz;
+  const d3 = abx * bpx + aby * bpy + abz * bpz;
+  const d4 = acx * bpx + acy * bpy + acz * bpz;
+  if (d3 >= 0 && d4 <= d3) return { dist2: bpx * bpx + bpy * bpy + bpz * bpz, qx: bx, qy: by, qz: bz };
+  const vc = d1 * d4 - d3 * d2;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+    const v = d1 / (d1 - d3);
+    const qx = ax + abx * v; const qy = ay + aby * v; const qz = az + abz * v;
+    return { dist2: (qx - px) * (qx - px) + (qy - py) * (qy - py) + (qz - pz) * (qz - pz), qx, qy, qz };
+  }
+  const cpx = px - cx; const cpy = py - cy; const cpz = pz - cz;
+  const d5 = abx * cpx + aby * cpy + abz * cpz;
+  const d6 = acx * cpx + acy * cpy + acz * cpz;
+  if (d6 >= 0 && d5 <= d6) return { dist2: cpx * cpx + cpy * cpy + cpz * cpz, qx: cx, qy: cy, qz: cz };
+  const vb = d5 * d2 - d1 * d6;
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+    const w = d2 / (d2 - d6);
+    const qx = ax + acx * w; const qy = ay + acy * w; const qz = az + acz * w;
+    return { dist2: (qx - px) * (qx - px) + (qy - py) * (qy - py) + (qz - pz) * (qz - pz), qx, qy, qz };
+  }
+  const va = d3 * d6 - d5 * d4;
+  if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) {
+    const w = (d4 - d3) / (d4 - d3 + (d5 - d6));
+    const qx = bx + (cx - bx) * w; const qy = by + (cy - by) * w; const qz = bz + (cz - bz) * w;
+    return { dist2: (qx - px) * (qx - px) + (qy - py) * (qy - py) + (qz - pz) * (qz - pz), qx, qy, qz };
+  }
+  const denom = 1 / (va + vb + vc);
+  const v = vb * denom;
+  const w = vc * denom;
+  const qx = ax + abx * v + acx * w; const qy = ay + aby * v + acy * w; const qz = az + abz * v + acz * w;
+  return { dist2: (qx - px) * (qx - px) + (qy - py) * (qy - py) + (qz - pz) * (qz - pz), qx, qy, qz };
+}
+
+/**
+ * Erro direcionado: distância de vértices amostrados até a grade
+ * (ex. vértices candidatos → grade da referência, construída uma vez).
+ */
+export function directedSamplesError(
+  grid: TriangleGrid,
+  positions: Float64Array | Float32Array | number[],
+  vertexCount: number,
+  alive: Uint8Array | null,
+  diagonal: number,
+  samples = 1200,
+): { mean: number; max: number } {
+  const count = Math.min(samples, vertexCount);
+  if (count === 0 || diagonal <= 0) return { mean: 0, max: 0 };
+  const stride = Math.max(1, Math.floor(vertexCount / count));
+  let sum = 0; let max = 0; let taken = 0;
+  for (let v = 0; v < vertexCount && taken < count; v += stride) {
+    if (alive && !alive[v]) continue;
+    const q = queryGridClosest(grid, positions[v * 3], positions[v * 3 + 1], positions[v * 3 + 2]);
+    const dist = Math.sqrt(q.dist2) / diagonal;
+    sum += dist;
+    if (dist > max) max = dist;
+    taken += 1;
+  }
+  return { mean: taken > 0 ? sum / taken : 0, max };
+}
+
+const SILHOUETTE_VIEWS: Array<[number, number, number]> = [
+  [1, 0, 0], [0, 1, 0], [0, 0, 1],
+  [0.577350269, 0.577350269, 0.577350269],
+  [0.577350269, 0.577350269, -0.577350269],
+  [0.577350269, -0.577350269, 0.577350269],
+  [-0.577350269, 0.577350269, 0.577350269],
+];
+
+function projectedArea(
+  positions: Float64Array | Float32Array | number[],
+  vertexCount: number,
+  alive: Uint8Array | null,
+  dir: [number, number, number],
+  maxSamples: number,
+): number {
+  // Base ortonormal à direção de vista.
+  const ax = Math.abs(dir[0]) < 0.9 ? 1 : 0;
+  const ay = Math.abs(dir[0]) < 0.9 ? 0 : 1;
+  const az = 0;
+  let e1x = ay * dir[2] - az * dir[1];
+  let e1y = az * dir[0] - ax * dir[2];
+  let e1z = ax * dir[1] - ay * dir[0];
+  const e1l = Math.hypot(e1x, e1y, e1z) || 1;
+  e1x /= e1l; e1y /= e1l; e1z /= e1l;
+  const e2x = dir[1] * e1z - dir[2] * e1y;
+  const e2y = dir[2] * e1x - dir[0] * e1z;
+  const e2z = dir[0] * e1y - dir[1] * e1x;
+  const stride = Math.max(1, Math.floor(vertexCount / maxSamples));
+  let minu = Infinity; let maxu = -Infinity;
+  let minv = Infinity; let maxv = -Infinity;
+  let taken = 0;
+  for (let v = 0; v < vertexCount && taken < maxSamples; v += stride) {
+    if (alive && !alive[v]) continue;
+    const x = positions[v * 3]; const y = positions[v * 3 + 1]; const z = positions[v * 3 + 2];
+    const u = x * e1x + y * e1y + z * e1z;
+    const w = x * e2x + y * e2y + z * e2z;
+    if (u < minu) minu = u;
+    if (u > maxu) maxu = u;
+    if (w < minv) minv = w;
+    if (w > maxv) maxv = w;
+    taken += 1;
+  }
+  if (taken === 0) return 0;
+  return (maxu - minu) * (maxv - minv);
+}
+
+/**
+ * Erro de silhueta: compara a área projetada (contorno) em 7 vistas
+ * (X, Y, Z + 4 diagonais). Retorna a maior diferença relativa.
+ * Invariante a translação; detecta encolhimento, achatamento e
+ * perda de membros/silhueta.
+ */
+export function silhouetteError(
+  refPositions: Float64Array | Float32Array | number[],
+  refCount: number,
+  candPositions: Float64Array | Float32Array | number[],
+  candCount: number,
+  candAlive: Uint8Array | null,
+  diagonal: number,
+): number {
+  void diagonal;
+  let worst = 0;
+  for (const dir of SILHOUETTE_VIEWS) {
+    const aRef = projectedArea(refPositions, refCount, null, dir, 4000);
+    const aCand = projectedArea(candPositions, candCount, candAlive, dir, 4000);
+    const denom = Math.max(aRef, 1e-24);
+    const diff = Math.abs(aCand - aRef) / denom;
+    if (diff > worst) worst = diff;
+  }
+  return worst;
+}

@@ -31,6 +31,20 @@ export interface MeshStats {
 
 export type Quality = 'low' | 'medium' | 'high' | 'ultra';
 
+/** Perfil de redução (fluxo COMPRESSÃO 3D): quality = fidelidade máxima. */
+export type ReductionProfile = 'quality' | 'balanced' | 'aggressive';
+
+/** Limites configuráveis (MAX_*): tetos de erro por operação e estágio. */
+export interface ReductionLimits {
+  maxMeanError?: number;
+  maxMaxError?: number;
+  maxNormalError?: number;
+  maxCurvatureError?: number;
+  maxSilhouetteError?: number;
+  maxVolumeError?: number;
+  maxDriftNormal?: number;
+}
+
 export interface SimplifyOptions {
   targetTriangles: number;
   quality: Quality;
@@ -39,6 +53,28 @@ export interface SimplifyOptions {
   protectDetails: boolean;
   timeBudgetMs?: number;
   onCheckpoint?: (activeTriangles: number) => boolean;
+  /** Quando presente, governa pisos e tetos (legado `quality` vira fallback). */
+  profile?: ReductionProfile;
+  limits?: ReductionLimits;
+}
+
+/** Relatório de qualidade da redução (números reais do arquivo produzido). */
+export interface SimplifyReport {
+  stages: number;
+  commits: number;
+  meanError: number;
+  maxError: number;
+  silhouetteError: number;
+  normalError: number;
+  curvatureError: number;
+  volumeDeltaPercent: number;
+  areaDeltaPercent: number;
+  boundaryOriginal: number;
+  boundaryFinal: number;
+  nonManifoldEdges: number;
+  degenerateTriangles: number;
+  stoppedReason: 'target' | 'quality' | 'time' | 'stall';
+  escalations: number;
 }
 
 export interface SimplifyResult {
@@ -58,6 +94,7 @@ export interface SimplifyResult {
     boundsDeltaPercent: number;
     qualityAccepted: boolean;
   };
+  report: SimplifyReport;
 }
 
 export interface BinaryStlResult {
@@ -78,6 +115,8 @@ export interface WorkerRequest {
   preserveSilhouette: boolean;
   protectDetails: boolean;
   timeBudgetMs?: number;
+  profile?: ReductionProfile;
+  limits?: ReductionLimits;
 }
 
 export type WorkerProgressPhase =
@@ -120,6 +159,7 @@ export interface WorkerSuccess {
   indices: Uint32Array;
   warnings: string[];
   validation: SimplifyResult['validation'];
+  report: SimplifyReport;
   format: MeshFormat;
 }
 

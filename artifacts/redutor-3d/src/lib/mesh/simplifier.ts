@@ -31,10 +31,13 @@ import { compactMesh } from './geometry';
 import { auditMesh, auditWithinTolerance } from './validation';
 import { computeComplexityMap, importanceMultiplier, RegionClass, edgeKeyOf } from './complexity';
 import {
-  approximateSurfaceError,
   boundaryCollapseAllowed,
+  buildTriangleGrid,
+  directedSamplesError,
   displacementAllowed,
   linkCondition,
+  queryGridClosest,
+  silhouetteError,
   triangleAspect,
   validateResultTriangles,
 } from './safeguards';
@@ -136,25 +139,59 @@ function optimalPosition(q: Quadric, ax: number, ay: number, az: number, bx: num
   return [(ax + bx) / 2, (ay + by) / 2, (az + bz) / 2];
 }
 
-interface QualityFloor {
-  maxMeanError: number;
-  maxMaxError: number;
-  maxVolumeDelta: number;
-  maxBoundsDelta: number;
+interface EngineParams {
+  floorMean: number;
+  floorMax: number;
+  volMax: number;
+  bndMax: number;
+  /** Teto normal (fração da diagonal) — deriva acumulada e teto por plano. */
+  driftN: number;
+  lockGate: number;
+  /** Tetos de estágio (Infinity = checagem desligada, comportamento legado). */
+  silhouetteMax: number;
+  normalMax: number;
+  curvatureMax: number;
+  dotCrit: number;
+  dotMicro: number;
+  aspectCrit: number;
+  aspectMicro: number;
 }
 
-function qualityFloorFor(quality: SimplifyOptions['quality']): QualityFloor {
-  switch (quality) {
-    case 'ultra':
-      return { maxMeanError: 0.0012, maxMaxError: 0.012, maxVolumeDelta: 1.2, maxBoundsDelta: 0.6 };
-    case 'high':
-      return { maxMeanError: 0.0025, maxMaxError: 0.025, maxVolumeDelta: 2.5, maxBoundsDelta: 1.2 };
-    case 'medium':
-      return { maxMeanError: 0.0045, maxMaxError: 0.045, maxVolumeDelta: 4, maxBoundsDelta: 2 };
-    case 'low':
-    default:
-      return { maxMeanError: 0.008, maxMaxError: 0.08, maxVolumeDelta: 6, maxBoundsDelta: 3 };
+/**
+ * Perfis QUALITY / BALANCED / AGGRESSIVE + limites configuráveis (MAX_*).
+ * Sem `profile`, reproduz exatamente o comportamento legado por `quality`
+ * (testes de regressão existentes dependem disso).
+ */
+function paramsFor(options: SimplifyOptions): EngineParams {
+  const q = options.quality;
+  const legacyDrift = q === 'ultra' ? 0.004 : q === 'high' ? 0.008 : q === 'medium' ? 0.015 : 0.03;
+  const legacyLock = q === 'ultra' ? 1e-4 : q === 'high' ? 4e-4 : q === 'medium' ? 1.5e-3 : 5e-3;
+  const legacyFloor = q === 'ultra'
+    ? { floorMean: 0.0012, floorMax: 0.012, volMax: 1.2, bndMax: 0.6 }
+    : q === 'high'
+      ? { floorMean: 0.0025, floorMax: 0.025, volMax: 2.5, bndMax: 1.2 }
+      : q === 'medium'
+        ? { floorMean: 0.0045, floorMax: 0.045, volMax: 4, bndMax: 2 }
+        : { floorMean: 0.008, floorMax: 0.08, volMax: 6, bndMax: 3 };
+  let base: EngineParams;
+  if (options.profile === 'quality') {
+    base = { ...legacyFloor, floorMean: 0.0012, floorMax: 0.012, volMax: 1.2, bndMax: 0.6, driftN: 0.004, lockGate: 1e-4, silhouetteMax: 0.012, normalMax: 0.02, curvatureMax: 0.03, dotCrit: 0.75, dotMicro: 0.6, aspectCrit: 4, aspectMicro: 6 };
+  } else if (options.profile === 'balanced') {
+    base = { ...legacyFloor, floorMean: 0.0025, floorMax: 0.025, volMax: 2.5, bndMax: 1.2, driftN: 0.008, lockGate: 4e-4, silhouetteMax: 0.02, normalMax: 0.035, curvatureMax: 0.05, dotCrit: 0.75, dotMicro: 0.6, aspectCrit: 4, aspectMicro: 6 };
+  } else if (options.profile === 'aggressive') {
+    base = { ...legacyFloor, floorMean: 0.006, floorMax: 0.06, volMax: 6, bndMax: 3, driftN: 0.02, lockGate: 2e-3, silhouetteMax: 0.045, normalMax: 0.06, curvatureMax: 0.09, dotCrit: 0.7, dotMicro: 0.55, aspectCrit: 6, aspectMicro: 8 };
+  } else {
+    base = { ...legacyFloor, driftN: legacyDrift, lockGate: legacyLock, silhouetteMax: Infinity, normalMax: Infinity, curvatureMax: Infinity, dotCrit: 0.75, dotMicro: 0.6, aspectCrit: 4, aspectMicro: 6 };
   }
+  const limits = options.limits ?? {};
+  if (limits.maxMeanError !== undefined) base.floorMean = limits.maxMeanError;
+  if (limits.maxMaxError !== undefined) base.floorMax = limits.maxMaxError;
+  if (limits.maxVolumeError !== undefined) base.volMax = limits.maxVolumeError;
+  if (limits.maxNormalError !== undefined) base.normalMax = limits.maxNormalError;
+  if (limits.maxCurvatureError !== undefined) base.curvatureMax = limits.maxCurvatureError;
+  if (limits.maxSilhouetteError !== undefined) base.silhouetteMax = limits.maxSilhouetteError;
+  if (limits.maxDriftNormal !== undefined) base.driftN = limits.maxDriftNormal;
+  return base;
 }
 
 function stageTargets(from: number, to: number): number[] {
@@ -188,8 +225,14 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
   const originalTriangles = mesh.indices.length / 3;
   const target = Math.max(4, Math.floor(options.targetTriangles));
   const referenceAudit = auditMesh(mesh);
-  const floor = qualityFloorFor(options.quality);
+  const P = paramsFor(options);
   const timedOut = (): boolean => performance.now() >= deadline;
+  // Métricas do último estágio validado (para o relatório final).
+  const lastMetrics = { mean: 0, max: 0, silhouette: 0, normal: 0, curvature: 0 };
+  let stoppedReason: 'target' | 'quality' | 'time' | 'stall' = 'target';
+  let escalations = 0;
+  let stagesCompleted = 0;
+  let commits = 0;
 
   const finishWith = (
     positions: Float32Array,
@@ -210,6 +253,18 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       ...finalAudit.reasons,
       ...(!safe ? ['A tolerância geométrica foi excedida; o melhor estado seguro foi mantido.'] : []),
     ];
+    const volumeDeltaPercent =
+      (Math.abs(Math.abs(outputAudit.volume) - Math.abs(referenceAudit.volume)) /
+        Math.max(Math.abs(referenceAudit.volume), Math.max(...referenceAudit.bounds.size, 1e-9) ** 3 * 1e-6)) * 100;
+    const boundsDeltaPercent =
+      (Math.max(
+        ...outputAudit.bounds.min.map((v, i) => Math.abs(v - referenceAudit.bounds.min[i])),
+        ...outputAudit.bounds.max.map((v, i) => Math.abs(v - referenceAudit.bounds.max[i])),
+      ) /
+        Math.max(...referenceAudit.bounds.size, 1e-9)) * 100;
+    const areaDeltaPercent =
+      (Math.abs(outputAudit.surfaceArea - referenceAudit.surfaceArea) /
+        Math.max(referenceAudit.surfaceArea, 1e-24)) * 100;
     return {
       positions: output.positions,
       indices: output.indices,
@@ -223,16 +278,26 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
         watertight: outputAudit.boundaryLoops === 0,
         boundaryLoops: outputAudit.boundaryLoops,
         nonManifoldEdges: outputAudit.nonManifoldEdges,
-        volumeDeltaPercent:
-          (Math.abs(Math.abs(outputAudit.volume) - Math.abs(referenceAudit.volume)) /
-            Math.max(Math.abs(referenceAudit.volume), Math.max(...referenceAudit.bounds.size, 1e-9) ** 3 * 1e-6)) * 100,
-        boundsDeltaPercent:
-          (Math.max(
-            ...outputAudit.bounds.min.map((v, i) => Math.abs(v - referenceAudit.bounds.min[i])),
-            ...outputAudit.bounds.max.map((v, i) => Math.abs(v - referenceAudit.bounds.max[i])),
-          ) /
-            Math.max(...referenceAudit.bounds.size, 1e-9)) * 100,
+        volumeDeltaPercent,
+        boundsDeltaPercent,
         qualityAccepted: outputAudit.valid,
+      },
+      report: {
+        stages: stagesCompleted,
+        commits,
+        meanError: lastMetrics.mean,
+        maxError: lastMetrics.max,
+        silhouetteError: lastMetrics.silhouette,
+        normalError: lastMetrics.normal,
+        curvatureError: lastMetrics.curvature,
+        volumeDeltaPercent,
+        areaDeltaPercent,
+        boundaryOriginal: referenceAudit.boundaryLoops,
+        boundaryFinal: outputAudit.boundaryLoops,
+        nonManifoldEdges: outputAudit.nonManifoldEdges,
+        degenerateTriangles: outputAudit.degenerateTriangles,
+        stoppedReason,
+        escalations,
       },
     };
   };
@@ -410,8 +475,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       }
     }
   }
-  const driftCapNormalBase =
-    (options.quality === 'ultra' ? 0.004 : options.quality === 'high' ? 0.008 : options.quality === 'medium' ? 0.015 : 0.03) * diagonal;
+  const driftCapNormalBase = P.driftN * diagonal;
 
   const heap = new MinHeap();
   const localEdgeLength = (vertex: number): number => {
@@ -571,11 +635,11 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       if (worstRegion === RegionClass.FeatureCritica) break;
     }
     const lockedEdge = (complexity.locked[a] === 1 && complexity.locked[b] === 1);
-    const lockGate = options.quality === 'ultra' ? 1e-4 : options.quality === 'high' ? 4e-4 : options.quality === 'medium' ? 1.5e-3 : 5e-3;
+    const lockGate = P.lockGate * planeMult * planeMult;
     if (lockedEdge && entry.cost > lockGate) return reject('lockgate');
 
-    const strictDot = worstRegion === RegionClass.FeatureCritica ? 0.75 : worstRegion === RegionClass.MicroDetalhe ? 0.6 : worstRegion === RegionClass.AltaCurvatura ? 0.5 : 0.35;
-    const maxAspect = worstRegion === RegionClass.FeatureCritica ? 4 : worstRegion === RegionClass.MicroDetalhe ? 6 : options.quality === 'low' ? 10 : 8;
+    const strictDot = worstRegion === RegionClass.FeatureCritica ? P.dotCrit : worstRegion === RegionClass.MicroDetalhe ? P.dotMicro : worstRegion === RegionClass.AltaCurvatura ? 0.5 : 0.35;
+    const maxAspect = worstRegion === RegionClass.FeatureCritica ? P.aspectCrit : worstRegion === RegionClass.MicroDetalhe ? P.aspectMicro : options.quality === 'low' ? 10 : 8;
     // O ponto médio está a 0.5*aresta de cada extremo: o limite precisa ser
     // >= 0.5 para nunca vetar o colapso mais seguro. A adaptatividade vem do
     // flip/aspecto/custo; o deslocamento só veta saltos (deformação).
@@ -653,7 +717,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     // face afetada sobrevivente além de planeCap. Deslizamentos sobre a
     // superfície (distância ≈ 0) passam; amassos são vetados na hora, sem
     // depender de validação global posterior.
-    const planeCap = driftCapNormalBase * regionFactor;
+    const planeCap = driftCapNormalBase * regionFactor * planeMult;
     for (const f of affected) {
       let i0 = tri[f * 3]; let i1 = tri[f * 3 + 1]; let i2 = tri[f * 3 + 2];
       if (i0 === b) i0 = a;
@@ -781,18 +845,98 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
   const warnings: string[] = [];
   let stoppedSafely = false;
   let iterations = 0;
-  let commits = 0;
+  // Multiplicador de escalonamento anti-stall (relaxa teto por plano e
+  // lock-gate de forma limitada quando o estágio trava sem progresso).
+  let planeMult = 1;
   // Orçamento em COMMITS (trabalho real), não em pops da fila: entradas
   // obsoletas/mortas da heap preguiçosa não podem consumir o orçamento.
   // O teto de parede (time budget, 60s) continua como trava principal.
   const maxCommits = Math.max(10_000, originalTriangles * 2);
 
-  const referenceSample: { positions: Float32Array; indices: Uint32Array } = {
-    positions: mesh.positions.slice() as Float32Array,
-    indices: mesh.indices.slice() as Uint32Array,
+  // Grade estática sobre a REFERÊNCIA (construída uma vez): todas as
+  // medições de distância e o reparo local consultam a mesma estrutura.
+  const refGrid = buildTriangleGrid(mesh.positions, mesh.indices);
+
+  // Variação de normais inicial por vértice (base do erro de curvatura).
+  const initVar = new Float64Array(vertexCount);
+  const curvatureVarOf = (v: number): number => {
+    const incident = vertFaces[v];
+    const n = incident.length;
+    if (n < 2) return 0;
+    let variation = 0;
+    const step = n > 8 ? Math.floor(n / 8) : 1;
+    for (let i = 0; i < n; i += step) {
+      const f0 = incident[i];
+      if (!triAlive[f0]) continue;
+      const l0 = Math.hypot(faceNormals[f0 * 3], faceNormals[f0 * 3 + 1], faceNormals[f0 * 3 + 2]);
+      if (l0 < 1e-18) continue;
+      for (let j = i + step; j < n; j += step) {
+        const f1 = incident[j];
+        if (!triAlive[f1]) continue;
+        const l1 = Math.hypot(faceNormals[f1 * 3], faceNormals[f1 * 3 + 1], faceNormals[f1 * 3 + 2]);
+        if (l1 < 1e-18) continue;
+        const cos = Math.max(-1, Math.min(1,
+          (faceNormals[f0 * 3] * faceNormals[f1 * 3] + faceNormals[f0 * 3 + 1] * faceNormals[f1 * 3 + 1] + faceNormals[f0 * 3 + 2] * faceNormals[f1 * 3 + 2]) / (l0 * l1)));
+        const v01 = 1 - cos;
+        if (v01 > variation) variation = v01;
+      }
+    }
+    return variation;
+  };
+  for (let v = 0; v < vertexCount; v += 1) initVar[v] = curvatureVarOf(v);
+
+  /** Erro de normal amostrado: desvio médio/máx vs. normais originais. */
+  const sampledNormalError = (samples: number): { mean: number; max: number } => {
+    const stride = Math.max(1, Math.floor(vertexCount / samples));
+    let sum = 0; let max = 0; let taken = 0;
+    for (let v = 0; v < vertexCount && taken < samples; v += stride) {
+      if (!vertAlive[v]) continue;
+      let nx = 0; let ny = 0; let nz = 0;
+      for (const f of vertFaces[v]) {
+        if (!triAlive[f]) continue;
+        nx += faceNormals[f * 3]; ny += faceNormals[f * 3 + 1]; nz += faceNormals[f * 3 + 2];
+      }
+      const l = Math.hypot(nx, ny, nz);
+      if (l < 1e-18) continue;
+      const ox = origNormals[v * 3]; const oy = origNormals[v * 3 + 1]; const oz = origNormals[v * 3 + 2];
+      const ol = Math.hypot(ox, oy, oz);
+      if (ol < 0.5) continue;
+      const dev = 1 - Math.max(-1, Math.min(1, (nx * ox + ny * oy + nz * oz) / (l * ol)));
+      sum += dev;
+      if (dev > max) max = dev;
+      taken += 1;
+    }
+    return { mean: taken > 0 ? sum / taken : 0, max };
   };
 
-  const validateStage = (candidate: { positions: Float32Array; indices: Uint32Array }): { ok: boolean; reasons: string[]; mean: number; max: number } => {
+  /** Erro de curvatura amostrado: |variação atual − inicial|. */
+  const sampledCurvatureError = (samples: number): { mean: number; max: number } => {
+    const stride = Math.max(1, Math.floor(vertexCount / samples));
+    let sum = 0; let max = 0; let taken = 0;
+    for (let v = 0; v < vertexCount && taken < samples; v += stride) {
+      if (!vertAlive[v]) continue;
+      const diff = Math.abs(curvatureVarOf(v) - initVar[v]);
+      sum += diff;
+      if (diff > max) max = diff;
+      taken += 1;
+    }
+    return { mean: taken > 0 ? sum / taken : 0, max };
+  };
+
+  interface StageCheck {
+    ok: boolean;
+    kind: 'topology' | 'metric';
+    reasons: string[];
+    mean: number;
+    max: number;
+    silhouette: number;
+    normal: number;
+    curvature: number;
+  }
+
+  const tolForVolume = options.profile ? P.bndMax / 100 : 0.025;
+
+  const validateStage = (candidate: { positions: Float32Array; indices: Uint32Array }): StageCheck => {
     const reasons: string[] = [];
     const candidateMesh: MeshData = {
       positions: candidate.positions,
@@ -802,76 +946,181 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     };
     const audit = auditMesh(candidateMesh, referenceAudit);
     reasons.push(...audit.reasons);
-    let ok = audit.valid;
-    let mean = 0; let max = 0;
-    if (ok) {
-      const err = approximateSurfaceError(referenceSample, candidate, diagonal, 900);
-      mean = err.mean; max = err.max;
-      if (mean > floor.maxMeanError) {
-        ok = false;
-        reasons.push(`Erro médio de superfície ${(mean * 100).toFixed(3)}% excedeu o piso de qualidade.`);
-      } else if (max > floor.maxMaxError) {
-        ok = false;
-        reasons.push(`Erro máximo de superfície ${(max * 100).toFixed(3)}% excedeu o piso de qualidade.`);
-      }
-      if (ok && !auditWithinTolerance(audit, referenceAudit)) {
-        ok = false;
-        reasons.push('Volume ou dimensões excederam a tolerância do estágio.');
-      }
+    if (!audit.valid) return { ok: false, kind: 'topology', reasons, mean: 0, max: 0, silhouette: 0, normal: 0, curvature: 0 };
+    if (!auditWithinTolerance(audit, referenceAudit, tolForVolume)) {
+      reasons.push('Volume ou dimensões excederam a tolerância do estágio.');
+      return { ok: false, kind: 'metric', reasons, mean: 0, max: 0, silhouette: 0, normal: 0, curvature: 0 };
     }
-    return { ok, reasons, mean, max };
+    // Superfície: vértices candidatos → grade estática da referência.
+    const candVerts = candidate.positions.length / 3;
+    const err = directedSamplesError(refGrid, candidate.positions, candVerts, null, diagonal, candVerts * 3 > 200000 ? 500 : 900);
+    // Silhueta multivista (X, Y, Z + 4 diagonais).
+    const sil = silhouetteError(mesh.positions, vertexCount, pos, vertexCount, vertAlive, diagonal);
+    // Normal + curvatura amostrados sobre o estado de trabalho.
+    const norm = sampledNormalError(1500);
+    const curv = sampledCurvatureError(1500);
+    let ok = true;
+    if (err.mean > P.floorMean) {
+      ok = false;
+      reasons.push(`Erro médio de superfície ${(err.mean * 100).toFixed(3)}% excedeu o piso de qualidade.`);
+    } else if (err.max > P.floorMax) {
+      ok = false;
+      reasons.push(`Erro máximo de superfície ${(err.max * 100).toFixed(3)}% excedeu o piso de qualidade.`);
+    }
+    if (ok && sil > P.silhouetteMax) {
+      ok = false;
+      reasons.push(`Erro de silhueta ${(sil * 100).toFixed(2)}% excedeu o limite.`);
+    }
+    if (ok && norm.mean > P.normalMax) {
+      ok = false;
+      reasons.push(`Desvio de normais ${(norm.mean * 100).toFixed(3)} excedeu o limite.`);
+    }
+    if (ok && curv.mean > P.curvatureMax) {
+      ok = false;
+      reasons.push(`Erro de curvatura ${(curv.mean * 100).toFixed(3)} excedeu o limite.`);
+    }
+    return { ok, kind: 'metric', reasons, mean: err.mean, max: err.max, silhouette: sil, normal: norm.mean, curvature: curv.mean };
   };
+
+  /** Recalcula normais das faces (consistência após reparo local). */
+  const refreshFaceNormals = (faces: Set<number>): void => {
+    for (const f of faces) {
+      if (!triAlive[f]) continue;
+      const i0 = tri[f * 3]; const i1 = tri[f * 3 + 1]; const i2 = tri[f * 3 + 2];
+      const ax = pos[i0 * 3]; const ay = pos[i0 * 3 + 1]; const az = pos[i0 * 3 + 2];
+      const bx = pos[i1 * 3]; const by = pos[i1 * 3 + 1]; const bz = pos[i1 * 3 + 2];
+      const cx = pos[i2 * 3]; const cy = pos[i2 * 3 + 1]; const cz = pos[i2 * 3 + 2];
+      faceNormals[f * 3] = (by - ay) * (cz - az) - (bz - az) * (cy - ay);
+      faceNormals[f * 3 + 1] = (bz - az) * (cx - ax) - (bx - ax) * (cz - az);
+      faceNormals[f * 3 + 2] = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    }
+  };
+
+  /**
+   * REPARO LOCAL (sem fill-hole): localiza os vértices mais afastados da
+   * referência (via grade estática), projeta-os 50% de volta à superfície
+   * original e atualiza normais/versões. O chamador revalida o estágio;
+   * se continuar reprovado, o rollback descarta tudo.
+   */
+  const attemptRepair = (): boolean => {
+    const stride = Math.max(1, Math.floor(vertexCount / 3000));
+    const repairTol = P.floorMax * diagonal * 0.5;
+    const touched = new Set<number>();
+    let moved = 0;
+    for (let v = 0; v < vertexCount; v += stride) {
+      if (!vertAlive[v]) continue;
+      const q = queryGridClosest(refGrid, pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]);
+      if (Math.sqrt(q.dist2) <= repairTol) continue;
+      pos[v * 3] = (pos[v * 3] + q.qx) / 2;
+      pos[v * 3 + 1] = (pos[v * 3 + 1] + q.qy) / 2;
+      pos[v * 3 + 2] = (pos[v * 3 + 2] + q.qz) / 2;
+      vertVersion[v] += 1;
+      for (const f of vertFaces[v]) touched.add(f);
+      moved += 1;
+      if (moved >= 500) break;
+    }
+    if (moved === 0) return false;
+    refreshFaceNormals(touched);
+    return true;
+  };
+
+  let qualityBlocked = false;
 
   for (let stage = 0; stage < totalStages; stage += 1) {
     const stageTarget = targets[stage];
-    const stageStartActive = activeTriangles;
-    let stageCommits = 0;
-    let stagePops = 0;
-    // Teto do estágio em COMMITS (+ folga para tentativas): pops obsoletos
-    // da heap preguiçosa não consomem o orçamento do estágio.
-    const stageCommitCap = Math.max(1000, (stageStartActive - stageTarget + 1) * 3);
-    const stagePopsCap = Math.max(10_000, (stageStartActive - stageTarget + 1) * 40);
-    while (activeTriangles > stageTarget && commits < maxCommits) {
-      if (timedOut() || options.onCheckpoint?.(activeTriangles) === false) {
-        stoppedSafely = true;
+    let attempts = 0;
+    let failed = false;
+    while (attempts < 3) {
+      const stageStartActive = activeTriangles;
+      let stageCommits = 0;
+      let stagePops = 0;
+      // Teto do estágio em COMMITS (+ folga para tentativas): pops obsoletos
+      // da heap preguiçosa não consomem o orçamento do estágio.
+      const stageCommitCap = Math.max(1000, (stageStartActive - stageTarget + 1) * 3);
+      const stagePopsCap = Math.max(10_000, (stageStartActive - stageTarget + 1) * 40);
+      while (activeTriangles > stageTarget && commits < maxCommits) {
+        if (timedOut() || options.onCheckpoint?.(activeTriangles) === false) {
+          stoppedSafely = true;
+          stoppedReason = 'time';
+          break;
+        }
+        iterations += 1;
+        stagePops += 1;
+        if (stageCommits > stageCommitCap || stagePops > stagePopsCap) break; // evita loop infinito em malha travada
+        const candidate = heap.pop();
+        if (!candidate) break;
+        if (tryCollapse(candidate)) {
+          commits += 1;
+          stageCommits += 1;
+        }
+        if (iterations % 4000 === 0) {
+          const overall = 1 - (activeTriangles - target) / Math.max(1, originalTriangles - target);
+          onProgress?.(Math.min(0.97, Math.max(0.03, 0.05 + overall * 0.85)));
+        }
+      }
+      if (stoppedSafely || timedOut()) {
+        stoppedReason = 'time';
         break;
       }
-      iterations += 1;
-      stagePops += 1;
-      if (stageCommits > stageCommitCap || stagePops > stagePopsCap) break; // evita loop infinito em malha travada
-      const candidate = heap.pop();
-      if (!candidate) break;
-      if (tryCollapse(candidate)) {
-        commits += 1;
-        stageCommits += 1;
+
+      // Valida o estágio; em falha métrica, tenta reparo local uma vez.
+      const dbgStage = (globalThis as Record<string, unknown>).__MESH_DEBUG as Record<string, number> | undefined;
+      if (dbgStage) {
+        dbgStage[`stage-${stage}-active`] = activeTriangles;
+        dbgStage[`stage-${stage}-heap`] = heap.size;
+        dbgStage[`stage-${stage}-iters`] = iterations;
       }
-      if (iterations % 4000 === 0) {
+      const compact = buildCompact();
+      let check = validateStage(compact);
+      if (!check.ok && check.kind === 'metric' && attempts === 0) {
+        if (attemptRepair()) {
+          const recheck = validateStage(buildCompact());
+          if (recheck.ok) {
+            check = recheck;
+          } else {
+            warnings.push(`Reparo local insuficiente no estágio ${stage + 1}/${totalStages}; mantido o melhor estado válido.`);
+          }
+        }
+      }
+      if (check.ok) {
+        bestValid = { positions: compact.positions, indices: compact.indices, triangles: compact.indices.length / 3 };
+        bestStageReached = stage;
+        stagesCompleted += 1;
+        lastMetrics.mean = check.mean;
+        lastMetrics.max = check.max;
+        lastMetrics.silhouette = check.silhouette;
+        lastMetrics.normal = check.normal;
+        lastMetrics.curvature = check.curvature;
+        activeTriangles = bestValid.triangles;
         const overall = 1 - (activeTriangles - target) / Math.max(1, originalTriangles - target);
         onProgress?.(Math.min(0.97, Math.max(0.03, 0.05 + overall * 0.85)));
+        break;
       }
-    }
-    if (stoppedSafely || timedOut()) break;
-
-    // Valida o estágio; em falha, ROLLBACK para o melhor estado válido.
-    const dbgStage = (globalThis as Record<string, unknown>).__MESH_DEBUG as Record<string, number> | undefined;
-    if (dbgStage) {
-      dbgStage[`stage-${stage}-active`] = activeTriangles;
-      dbgStage[`stage-${stage}-heap`] = heap.size;
-      dbgStage[`stage-${stage}-iters`] = iterations;
-    }
-    const compact = buildCompact();
-    const check = validateStage(compact);
-    if (check.ok) {
-      bestValid = { positions: compact.positions, indices: compact.indices, triangles: compact.indices.length / 3 };
-      bestStageReached = stage;
-      activeTriangles = bestValid.triangles;
-      const overall = 1 - (activeTriangles - target) / Math.max(1, originalTriangles - target);
-      onProgress?.(Math.min(0.97, Math.max(0.03, 0.05 + overall * 0.85)));
-      if (activeTriangles <= target) break;
-    } else {
+      // Sem progresso (<2% do necessário)? Escala agressividade de forma
+      // limitada (áreas simples pagam mais) e tenta de novo. Falha
+      // topológica nunca escala: faz rollback imediato.
+      const made = stageStartActive - activeTriangles;
+      const needed = Math.max(1, stageStartActive - stageTarget);
+      if (check.kind === 'metric' && made < needed * 0.02 && escalations < 2 && attempts < 2 && !timedOut()) {
+        escalations += 1;
+        planeMult *= 1.6;
+        attempts += 1;
+        continue;
+      }
       warnings.push(`Estágio ${stage + 1}/${totalStages} rejeitado pela validação: ${check.reasons.join(' ')}`);
+      qualityBlocked = true;
+      stoppedReason = 'quality';
+      failed = true;
       break; // mantém o melhor estado válido (target flexível)
     }
+    if (failed || stoppedSafely || timedOut()) break;
+    if (activeTriangles <= target) {
+      stoppedReason = 'target';
+      break;
+    }
+  }
+  if (stoppedReason === 'target' && bestValid.triangles > target && !timedOut()) {
+    stoppedReason = qualityBlocked ? 'quality' : 'stall';
   }
 
   if (bestStageReached < 0) {
@@ -880,11 +1129,25 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     const check = validateStage(compact);
     if (check.ok && compact.indices.length / 3 < originalTriangles) {
       bestValid = { positions: compact.positions, indices: compact.indices, triangles: compact.indices.length / 3 };
+      lastMetrics.mean = check.mean;
+      lastMetrics.max = check.max;
+      lastMetrics.silhouette = check.silhouette;
+      lastMetrics.normal = check.normal;
+      lastMetrics.curvature = check.curvature;
     }
   }
 
   if (bestValid.triangles > target) {
-    warnings.push('A preservação geométrica impediu atingir o alvo; o melhor estado seguro foi mantido.');
+    if (qualityBlocked || stoppedReason === 'quality') {
+      warnings.push('Redução máxima segura atingida: a qualidade impediu avançar ao alvo sem deformar o modelo. Entregue o melhor estado válido.');
+    } else if (stoppedReason === 'time') {
+      warnings.push('Tempo máximo atingido: entregue o melhor estado válido até o momento.');
+    } else if (bestValid.triangles >= originalTriangles) {
+      stoppedReason = 'stall';
+      warnings.push('Nenhuma redução segura foi possível; o original foi preservado intacto.');
+    } else {
+      warnings.push('A preservação geométrica impediu atingir o alvo; o melhor estado seguro foi mantido.');
+    }
   }
 
   const finalPositions = bestValid.positions;
