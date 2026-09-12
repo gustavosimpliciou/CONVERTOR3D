@@ -106,6 +106,34 @@ export interface BinaryStlResult {
   error?: string;
 }
 
+export interface ImportRequest {
+  type: 'import';
+  buffer: ArrayBuffer;
+  fileName: string;
+}
+
+export interface ImportTopology {
+  boundaryLoops: number;
+  nonManifoldEdges: number;
+  components: number;
+  degenerateTriangles: number;
+  watertight: boolean;
+  volume: number;
+}
+
+export interface ImportSuccess {
+  type: 'complete';
+  job: 'import';
+  positions: Float32Array;
+  indices: Uint32Array;
+  stats: MeshStats;
+  formatLabel: string;
+  format: MeshFormat;
+  topology: ImportTopology;
+  quirks: string[];
+  elapsedMs: number;
+}
+
 export interface WorkerRequest {
   type: 'process';
   buffer: ArrayBuffer;
@@ -168,6 +196,8 @@ export interface WorkerFailure {
   type: 'error';
   message: string;
   technical?: string;
+  /** ZERO_REDUCTION = otimização não avançou (upload continua válido). */
+  code?: 'ZERO_REDUCTION' | 'UNREADABLE';
 }
 
 // ---------------------------------------------------------------------------

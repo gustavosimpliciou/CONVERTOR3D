@@ -9,6 +9,7 @@
     "validate:compression": "tsx ./src/validate-compression.ts",
     "validate:stl-delivery": "tsx ./src/validate-stldelivery.ts",
     "validate:reduction": "tsx ./src/validate-reduction.ts",
+    "validate:upload": "tsx ./src/validate-upload.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {

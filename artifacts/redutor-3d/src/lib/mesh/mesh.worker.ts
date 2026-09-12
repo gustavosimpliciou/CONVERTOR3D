@@ -3,12 +3,89 @@ import { auditMesh, auditWithinTolerance } from './validation';
 import { parseMesh } from './parser';
 import { simplifyMesh } from './simplifier';
 import { exportBinaryStl } from './stl';
-import type { MeshData, WorkerFailure, WorkerProgress, WorkerRequest, WorkerSuccess } from './types';
+import { NotStlError, parseStlForImport } from './stl-import';
+import type {
+  ImportRequest,
+  ImportSuccess,
+  MeshData,
+  WorkerFailure,
+  WorkerProgress,
+  WorkerRequest,
+  WorkerSuccess,
+} from './types';
 
-const post = (message: WorkerProgress | WorkerSuccess | WorkerFailure, transfer: Transferable[] = []) =>
-  self.postMessage(message, { transfer });
+const post = (
+  message: WorkerProgress | WorkerSuccess | ImportSuccess | WorkerFailure,
+  transfer: Transferable[] = [],
+) => self.postMessage(message, { transfer });
 
-self.onmessage = (event: MessageEvent<WorkerRequest>) => {
+/**
+ * IMPORTAÇÃO (upload): só lê e valida a ESTRUTURA. Nunca reduz, nunca
+ * avalia target. Falha SOMENTE se o arquivo for ilegível.
+ */
+async function handleImport(request: ImportRequest): Promise<void> {
+  const started = performance.now();
+  const bytes = new Uint8Array(request.buffer);
+  let imported;
+  try {
+    imported = parseStlForImport(bytes, request.fileName);
+  } catch (error) {
+    if (error instanceof NotStlError) {
+      // Formatos não-STL: parser geral (mantém OBJ/PLY/etc. funcionando).
+      const mesh = parseMesh(request.buffer, request.fileName);
+      const stats = buildStats(mesh);
+      if (stats.triangles === 0) throw new Error('O arquivo não contém geometria válida (0 faces).');
+      const audit = auditMesh(mesh);
+      imported = {
+        mesh,
+        stats,
+        formatLabel: mesh.format,
+        audit,
+        quirks: audit.boundaryLoops > 0
+          ? [`Modelo com ${audit.boundaryLoops.toLocaleString('pt-BR')} abertura(s) original(is) — serão preservadas.`]
+          : [],
+      };
+    } else {
+      throw error;
+    }
+  }
+  const done: ImportSuccess = {
+    type: 'complete',
+    job: 'import',
+    positions: imported.mesh.positions,
+    indices: imported.mesh.indices,
+    stats: imported.stats,
+    formatLabel: imported.formatLabel,
+    format: imported.mesh.format,
+    topology: {
+      boundaryLoops: imported.audit.boundaryLoops,
+      nonManifoldEdges: imported.audit.nonManifoldEdges,
+      components: imported.audit.components,
+      degenerateTriangles: imported.audit.degenerateTriangles,
+      watertight: imported.audit.boundaryLoops === 0,
+      volume: imported.audit.volume,
+    },
+    quirks: imported.quirks,
+    elapsedMs: performance.now() - started,
+  };
+  self.postMessage(done, {
+    transfer: [imported.mesh.positions.buffer, imported.mesh.indices.buffer],
+  });
+}
+
+self.onmessage = (event: MessageEvent<ImportRequest | WorkerRequest>) => {
+  if (event.data.type === 'import') {
+    handleImport(event.data).catch((error: unknown) => {
+      const failure: WorkerFailure = {
+        type: 'error',
+        code: 'UNREADABLE',
+        message: error instanceof Error ? error.message : 'Arquivo inválido.',
+        technical: error instanceof Error ? error.stack : String(error),
+      };
+      post(failure);
+    });
+    return;
+  }
   if (event.data.type !== 'process') return;
   const request = event.data;
   const started = performance.now();
@@ -97,7 +174,13 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
       throw new Error(`A malha reduzida não passou na validação final: ${finalAudit.reasons.join(' ') || 'tolerância geométrica excedida.'}`);
     }
     if (!madeProgress) {
-      throw new Error('Nenhuma redução segura foi possível para este modelo — o original foi preservado intacto.');
+      // Upload continua válido: o MODELO está carregado, só a redução não
+      // avançou. A UI mostra isso como aviso (não como "não pôde ser lido").
+      const error = new Error(
+        'Nenhuma redução segura foi possível para este modelo com os limites atuais — o original foi preservado intacto. Tente o perfil Máximo ou a aba Sem alterar malha.',
+      ) as Error & { code?: string };
+      error.code = 'ZERO_REDUCTION';
+      throw error;
     }
 
     // 4. EXPORTAÇÃO → REIMPORTAÇÃO REAL (o STL só é liberado validado)
@@ -149,6 +232,7 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
       type: 'error',
       message: error instanceof Error ? error.message : 'Não foi possível processar este modelo com segurança.',
       technical: error instanceof Error ? error.stack : String(error),
+      code: (error as { code?: 'ZERO_REDUCTION' })?.code,
     };
     post(failure);
   }

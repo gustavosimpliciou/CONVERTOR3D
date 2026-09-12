@@ -149,8 +149,9 @@ export function detectFormat(fileName: string, bytes: Uint8Array): FormatInfo {
     }
   }
 
-  // STL ASCII: "solid" + "facet normal".
-  if (/^\s*solid/.test(head) && bytes.length > 128) {
+  // STL ASCII: "solid" + "facet normal" (sem mínimo arbitrário de tamanho —
+  // um triângulo ASCII legítimo tem ~120 bytes e era rejeitado antes).
+  if (/^\s*solid/.test(head) && bytes.length > 32) {
     const probe = headText(bytes, 8192);
     if (probe.includes('facet') && probe.includes('vertex')) {
       const { faces } = quickCount(bytes, 'STL_ASCII');

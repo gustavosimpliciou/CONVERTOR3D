@@ -1,4 +1,6 @@
 import type {
+  ImportRequest,
+  ImportSuccess,
   MeshData,
   SimplifyOptions,
   WorkerFailure,
@@ -9,45 +11,64 @@ import type {
 
 export type ProcessorEvent =
   | { type: 'progress'; data: WorkerProgress }
-  | { type: 'complete'; data: WorkerSuccess }
+  | { type: 'complete'; data: WorkerSuccess | ImportSuccess }
   | { type: 'error'; data: WorkerFailure };
+
+/**
+ * Classifica erro do worker: ZERO_REDUCTION (upload válido, só a redução
+ * não avançou → aviso, modelo mantido) vs. erro fatal (arquivo ilegível).
+ */
+export function isZeroReductionError(data: WorkerFailure): boolean {
+  return data.code === 'ZERO_REDUCTION' || data.message.includes('Nenhuma redução segura');
+}
 
 export function createMeshProcessor() {
   let worker: Worker | undefined;
 
+  const spawn = (onEvent: (event: ProcessorEvent) => void): Worker => {
+    worker?.terminate();
+    worker = new Worker(new URL('./mesh.worker.ts', import.meta.url), { type: 'module' });
+    worker.onmessage = (event: MessageEvent<WorkerProgress | WorkerSuccess | ImportSuccess | WorkerFailure>) => {
+      if (event.data.type === 'progress') onEvent({ type: 'progress', data: event.data });
+      else if (event.data.type === 'complete') {
+        onEvent({ type: 'complete', data: event.data });
+        worker?.terminate();
+        worker = undefined;
+      } else {
+        onEvent({ type: 'error', data: event.data });
+        worker?.terminate();
+        worker = undefined;
+      }
+    };
+    worker.onerror = (event) => {
+      onEvent({
+        type: 'error',
+        data: {
+          type: 'error',
+          message: 'O navegador não conseguiu concluir o processamento deste arquivo.',
+          technical: event.message,
+        },
+      });
+      worker?.terminate();
+      worker = undefined;
+    };
+    return worker;
+  };
+
   return {
+    /** IMPORTAÇÃO (upload): só lê e valida a estrutura. Nunca reduz. */
+    parse(buffer: ArrayBuffer, fileName: string, onEvent: (event: ProcessorEvent) => void) {
+      const active = spawn(onEvent);
+      const request: ImportRequest = { type: 'import', buffer, fileName };
+      active.postMessage(request, [buffer]);
+    },
     process(
       buffer: ArrayBuffer,
       fileName: string,
       options: SimplifyOptions,
       onEvent: (event: ProcessorEvent) => void,
     ) {
-      worker?.terminate();
-      worker = new Worker(new URL('./mesh.worker.ts', import.meta.url), { type: 'module' });
-      worker.onmessage = (event: MessageEvent<WorkerProgress | WorkerSuccess | WorkerFailure>) => {
-        if (event.data.type === 'progress') onEvent({ type: 'progress', data: event.data });
-        else if (event.data.type === 'complete') {
-          onEvent({ type: 'complete', data: event.data });
-          worker?.terminate();
-          worker = undefined;
-        } else {
-          onEvent({ type: 'error', data: event.data });
-          worker?.terminate();
-          worker = undefined;
-        }
-      };
-      worker.onerror = (event) => {
-        onEvent({
-          type: 'error',
-          data: {
-            type: 'error',
-            message: 'O navegador não conseguiu concluir o processamento deste arquivo.',
-            technical: event.message,
-          },
-        });
-        worker?.terminate();
-        worker = undefined;
-      };
+      const active = spawn(onEvent);
       const request: WorkerRequest = {
         type: 'process',
         buffer,
@@ -61,7 +82,7 @@ export function createMeshProcessor() {
         profile: options.profile,
         limits: options.limits,
       };
-      worker.postMessage(request, [buffer]);
+      active.postMessage(request, [buffer]);
     },
     cancel() {
       worker?.terminate();

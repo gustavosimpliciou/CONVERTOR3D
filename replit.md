@@ -14,6 +14,7 @@ Uma ferramenta local com dois modos: **Compressor Lossless** (fluxo principal �
 - `pnpm --filter @workspace/scripts run validate:stl-delivery` — testes da entrega STL/OBJ (27 checks, inclui modelo de 1M faces ≈ 50MB)
 - `pnpm --filter @workspace/scripts run validate:decimation` — testes de regressão do redutor (19 checks)
 - `pnpm --filter @workspace/scripts run validate:reduction` — testes da redução adaptativa (27 checks, inclui end-to-end no STL real de 1,5M faces)
+- `pnpm --filter @workspace/scripts run validate:upload` — testes do fluxo de upload (20 checks: binário/ASCII, truncado, vazio, malha aberta aceita, erros específicos)
 - Required env: `DATABASE_URL` — Postgres connection string
 
 ## Netlify
@@ -55,6 +56,8 @@ Uma ferramenta local com dois modos: **Compressor Lossless** (fluxo principal �
 ## Product
 
 MODO 1 — Compressor Lossless (fluxo principal): o usuário carrega STL, OBJ, PLY, OFF, GLB, GLTF, FBX, DAE, 3MF ou .3dpack, vê a análise (formato, tamanho, faces, SHA-256, entropia), escolhe o nível (máxima velocidade / balanceado / máxima compressão), comprime e baixa `.3dpack` + `.gz` universal + o original reconstruído — tudo validado byte a byte (LOSSLESS PASS). A malha nunca é modificada.
+
+Upload ≠ otimização: `src/lib/mesh/stl-import.ts` (parse + validação estrutural, sem three.js, sem redução) decide se o arquivo é legível; o worker separa `import` (aceita, com quirks) de `process` (reduz, com cascata); falha de redução com progresso zero vira aviso com o modelo mantido (`ZERO_REDUCTION`), nunca "não pôde ser lido".
 
 MODO 2 — Redutor de Geometria (separado): inspecionar a geometria, definir um limite de triângulos, escolher a prioridade de preservação, acompanhar o processamento local, comparar a malha e baixar um STL binário validado.
 

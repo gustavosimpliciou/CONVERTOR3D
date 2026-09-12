@@ -25,11 +25,11 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import NotFound from '@/pages/not-found';
 import { Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
 import { buildStats } from './lib/mesh/geometry';
-import { createMeshProcessor, downloadStl } from './lib/mesh/processor';
+import { createMeshProcessor, downloadStl, isZeroReductionError } from './lib/mesh/processor';
 import { createCompressor, downloadBytes } from './lib/compress/processor';
 import { packGzip } from './lib/compress/container';
 import type { MeshData, MeshStats, Quality, WorkerSuccess } from './lib/mesh/types';
-import type { AnalyzeSuccess, CompressAnalysis, DecompressSuccess, OptimizeSuccess, ReductionProfile, SimplifyReport } from './lib/mesh/types';
+import type { AnalyzeSuccess, CompressAnalysis, DecompressSuccess, ImportTopology, OptimizeSuccess, ReductionProfile, SimplifyReport } from './lib/mesh/types';
 
 export type AppMode = 'compress' | 'reduce';
 
@@ -493,6 +493,9 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
   const [liveOriginal, setLiveOriginal] = useState(0);
   const [comparing, setComparing] = useState(false);
   const [reduced, setReduced] = useState<ReducedResult | null>(null);
+  const [topology, setTopology] = useState<ImportTopology | null>(null);
+  const [quirks, setQuirks] = useState<string[]>([]);
+  const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [gzBusy, setGzBusy] = useState(false);
 
@@ -500,6 +503,7 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
     procRef.current?.cancel();
     fileRef.current = undefined;
     setPhase('empty'); setModel(undefined); setReduced(null); setError('');
+    setTopology(null); setQuirks([]); setNotice('');
     setProgress(0); setComparing(false); setElapsedMs(0);
   }, []);
 
@@ -507,25 +511,27 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
     procRef.current?.cancel();
     const proc = createMeshProcessor();
     procRef.current = proc;
-    setPhase('importing'); setProgress(2); setElapsedMs(0); setMessage('lendo estrutura do arquivo'); setError('');
-    setStage('ANALISANDO'); setLiveTriangles(0); setLiveOriginal(0);
-    proc.process(await file.arrayBuffer(), file.name, {
-      targetTriangles: Number.MAX_SAFE_INTEGER, quality: 'high',
-      preserveBorders: true, preserveSilhouette: true, protectDetails: true,
-      profile: 'quality', timeBudgetMs: 30_000,
-    }, (event) => {
+    setPhase('importing'); setProgress(2); setElapsedMs(0); setMessage('lendo estrutura do arquivo'); setError(''); setNotice('');
+    setTopology(null); setQuirks([]); setReduced(null);
+    // IMPORTAÇÃO PURA: só parse + validação estrutural. Nenhuma redução,
+    // nenhum target — o upload é aceito se o arquivo for legível.
+    proc.parse(await file.arrayBuffer(), file.name, (event) => {
       if (event.type === 'progress') {
         setProgress(Math.round(event.data.progress * 100));
         setMessage(event.data.message.replace('…', '')); setElapsedMs(event.data.elapsedMs ?? 0);
-        if (event.data.stage) setStage(event.data.stage);
       } else if (event.type === 'complete') {
-        const result: WorkerSuccess = event.data;
-        const imported: MeshData = { positions: result.positions, indices: result.indices, format: result.format, bounds: result.original.bounds };
-        const stats = buildStats(imported);
-        setModel({ name: file.name, format: result.format, bytes: file.size, stats, mesh: imported });
-        setPhase('ready'); setProgress(0);
+        const data = event.data;
+        if (data.job === 'import') {
+          const imported: MeshData = { positions: data.positions, indices: data.indices, format: data.format, bounds: data.stats.bounds };
+          setModel({ name: file.name, format: data.formatLabel, bytes: file.size, stats: data.stats, mesh: imported });
+          setTopology(data.topology);
+          setQuirks(data.quirks);
+          setPhase('ready'); setProgress(0);
+          setMessage('Modelo carregado com sucesso.');
+        }
         procRef.current = undefined;
       } else {
+        // Aqui sim é erro de LEITURA (arquivo inválido/corrompido).
         setError(event.data.message); setPhase('error'); setProgress(0); procRef.current = undefined;
       }
     });
@@ -538,7 +544,7 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
     procRef.current?.cancel();
     const proc = createMeshProcessor();
     procRef.current = proc;
-    setPhase('reducing'); setProgress(2); setElapsedMs(0); setMessage('mapeando importância geométrica'); setError(''); setReduced(null);
+    setPhase('reducing'); setProgress(2); setElapsedMs(0); setMessage('mapeando importância geométrica'); setError(''); setReduced(null); setNotice('');
     setStage('ANALISANDO'); setLiveTriangles(0); setLiveOriginal(0);
     const tris = model.stats.triangles;
     const budget = tris < 500000 ? 55_000 : Math.min(300000, 55000 + ((tris - 500000) / 500000) * 60000);
@@ -563,7 +569,15 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
         setComparing(true); setProgress(100); setPhase('done');
         procRef.current = undefined;
       } else {
-        setError(event.data.message); setPhase('error'); setProgress(0); procRef.current = undefined;
+        // Falha de OTIMIZAÇÃO ≠ falha de upload: o modelo continua
+        // carregado; o aviso explica e sugere alternativas.
+        if (isZeroReductionError(event.data)) {
+          setNotice(`${event.data.message} Tente o perfil Máximo ou a aba Sem alterar malha.`);
+          setPhase('ready'); setProgress(0);
+        } else {
+          setError(event.data.message); setPhase('error'); setProgress(0);
+        }
+        procRef.current = undefined;
       }
     });
   }, [model, targetPercent, profile]);
@@ -607,18 +621,23 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
     {phase === 'importing' && <ImportingView progress={progress} message={message} />}
     {phase === 'reducing' && model && <ProcessingView progress={progress} message={message} elapsedMs={elapsedMs} stage={stage} originalTriangles={liveOriginal || model.stats.triangles} currentTriangles={liveTriangles || model.stats.triangles} targetTriangles={targetFaces} onCancel={cancel} />}
     {phase === 'ready' && model && <main className="relative mx-auto max-w-[1480px] px-4 py-5 md:px-7 lg:px-10">
-      <div className="mb-5"><div className="eyebrow mb-2 text-orange-400/80">02 / meta de redução</div><h1 className="text-2xl font-medium tracking-[-.035em] md:text-3xl">Quanto reduzir?</h1></div>
+      <div className="mb-5"><div className="eyebrow mb-2 text-orange-400/80">02 / meta de redução</div><h1 className="text-2xl font-medium tracking-[-.035em] md:text-3xl">Arquivo carregado. Quanto reduzir?</h1></div>
+      {notice && <div className="mb-4 border border-orange-400/20 bg-orange-500/[.06] px-3 py-2 text-xs text-orange-200">{notice}</div>}
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
         <section className="panel p-4" aria-label="Arquivo">
-          <div className="mb-3 flex items-center gap-2"><FileBox size={15} className="text-orange-400" /><span className="text-sm font-medium">Modelo carregado</span></div>
+          <div className="mb-3 flex items-center gap-2"><CheckCircle2 size={15} className="text-emerald-400" /><span className="text-sm font-medium">Arquivo recebido ✓</span></div>
           <div className="truncate text-xs text-stone-200">{model.name}</div>
           <div className="mono mt-1 text-[10px] text-stone-600">{model.format} · {formatBytes(model.bytes)}</div>
           <div className="mt-2">
+            <MetaLine label="Status" value="Modelo carregado com sucesso." accent />
             <MetaLine label="Tamanho original" value={formatBytes(model.bytes)} />
-            <MetaLine label="Faces originais" value={formatCount(model.stats.triangles)} />
+            <MetaLine label="Faces" value={formatCount(model.stats.triangles)} />
+            <MetaLine label="Vértices" value={formatCount(model.stats.vertices)} />
+            {topology && <MetaLine label="Topologia" value={topology.watertight ? 'VÁLIDA / WATERTIGHT' : `VÁLIDA / ${formatCount(topology.boundaryLoops)} abertura(s) originais`} />}
             <MetaLine label="Alvo de faces" value={formatCount(targetFaces)} accent />
             <MetaLine label="Tamanho estimado" value={`~${formatBytes(84 + targetFaces * 50)}`} accent />
           </div>
+          {quirks.length > 0 && <div className="mt-3 border-t border-white/[.06] pt-3">{quirks.map((quirk) => <div key={quirk} className="mb-1 text-[11px] leading-5 text-stone-500">· {quirk}</div>)}</div>}
         </section>
         <section className="panel flex flex-col gap-4 p-4" aria-label="Meta e perfil">
           <MetaSelect target={targetPercent} onChange={setTargetPercent} />
