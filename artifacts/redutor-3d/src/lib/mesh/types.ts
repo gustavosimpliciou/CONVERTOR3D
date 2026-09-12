@@ -27,11 +27,9 @@ export interface MeshStats {
   bounds: Bounds;
   finite: boolean;
   degenerateTriangles: number;
-  components?: number;
-  hasSilhouette?: boolean;
 }
 
-export type Quality = 'low' | 'medium' | 'speed' | 'high' | 'ultra';
+export type Quality = 'low' | 'medium' | 'high' | 'ultra';
 
 export interface SimplifyOptions {
   targetTriangles: number;
@@ -39,7 +37,6 @@ export interface SimplifyOptions {
   preserveBorders: boolean;
   preserveSilhouette: boolean;
   protectDetails: boolean;
-  distributeFacesProportionally: boolean;
 }
 
 export interface SimplifyResult {
@@ -49,7 +46,6 @@ export interface SimplifyResult {
   vertices: number;
   reductionPercent: number;
   warnings: string[];
-  perComponent?: { triangles: number; vertices: number }[];
 }
 
 export interface BinaryStlResult {
@@ -69,7 +65,6 @@ export interface WorkerRequest {
   preserveBorders: boolean;
   preserveSilhouette: boolean;
   protectDetails: boolean;
-  distributeFacesProportionally: boolean;
 }
 
 export type WorkerProgressPhase =
@@ -96,18 +91,10 @@ export interface WorkerSuccess {
   indices: Uint32Array;
   warnings: string[];
   format: MeshFormat;
-  perComponent?: { triangles: number; vertices: number }[];
 }
 
 export interface WorkerFailure {
   type: 'error';
   message: string;
   technical?: string;
-}
-
-export interface ComponentDistribution {
-  componentName: string;
-  originalTriangles: number;
-  targetTriangles: number;
-  reductionPercent: number;
 }
