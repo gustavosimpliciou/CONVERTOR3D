@@ -120,11 +120,45 @@ export function normalizeTriangles(
   triangles: number[][],
   format: MeshData['format'],
 ): MeshData {
+  // CONTROLLED VERTEX WELDING (importação preservada):
+  // 1) Passada exata (bit-identical) via hash — O(V), sem risco de fundir
+  //    pontos distintos.
+  // 2) Passada espacial com tolerância proporcional à escala do modelo
+  //    (diagonal * 1e-7, com piso absoluto). Nunca une pontos diferentes
+  //    apenas por estarem próximos: só dentro da tolerância dimensional.
+  // 3) Union-find com compressão de caminho + reconstrução da conectividade
+  //    descartando apenas faces degeneradas em relação à escala.
   const bounds = calculateBounds(new Float32Array(positions));
-  const diagonal = Math.hypot(...bounds.size);
-  const tolerance = Math.max(diagonal * 1e-7, 1e-9);
+  const diagonal = Math.hypot(...bounds.size) || 1;
+  const tolerance = Math.min(Math.max(diagonal * 1e-7, 1e-12), diagonal * 1e-4);
+  const vertexCount = positions.length / 3;
+  const parent = new Int32Array(vertexCount);
+  for (let i = 0; i < vertexCount; i += 1) parent[i] = i;
+  const find = (x: number): number => {
+    let root = x;
+    while (parent[root] !== root) root = parent[root];
+    while (parent[x] !== root) {
+      const next = parent[x];
+      parent[x] = root;
+      x = next;
+    }
+    return root;
+  };
+  const union = (a: number, b: number): void => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[rb] = ra;
+  };
+  // Passada 1: duplicatas exatas.
+  const exact = new Map<string, number>();
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    const key = `${positions[vertex * 3]}|${positions[vertex * 3 + 1]}|${positions[vertex * 3 + 2]}`;
+    const existing = exact.get(key);
+    if (existing === undefined) exact.set(key, vertex);
+    else union(existing, vertex);
+  }
+  // Passada 2: vizinhança espacial (somente raízes sobrevivem nos buckets).
   const buckets = new Map<string, number[]>();
-  const welded = new Array<number>(positions.length / 3);
   const cell = (value: number) => Math.floor(value / tolerance);
   const distanceSquared = (a: number, b: number) => {
     const dx = positions[a * 3] - positions[b * 3];
@@ -132,24 +166,33 @@ export function normalizeTriangles(
     const dz = positions[a * 3 + 2] - positions[b * 3 + 2];
     return dx * dx + dy * dy + dz * dz;
   };
-  for (let vertex = 0; vertex < positions.length / 3; vertex += 1) {
+  const maxDistSq = tolerance * tolerance;
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    if (find(vertex) !== vertex) continue; // já fundido na passada exata
     const x = positions[vertex * 3], y = positions[vertex * 3 + 1], z = positions[vertex * 3 + 2];
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
     const cx = cell(x), cy = cell(y), cz = cell(z);
-    let representative: number | undefined;
-    let nearest = tolerance * tolerance;
+    let nearest = -1;
+    let nearestDist = maxDistSq;
     for (let ox = -1; ox <= 1; ox += 1) for (let oy = -1; oy <= 1; oy += 1) for (let oz = -1; oz <= 1; oz += 1) {
       for (const candidate of buckets.get(`${cx + ox}:${cy + oy}:${cz + oz}`) ?? []) {
-        const distance = distanceSquared(vertex, candidate);
-        if (distance <= nearest) { nearest = distance; representative = candidate; }
+        const root = find(candidate);
+        if (root === vertex) continue;
+        const distance = distanceSquared(vertex, root);
+        if (distance <= nearestDist) { nearestDist = distance; nearest = root; }
       }
     }
-    if (representative === undefined) representative = vertex;
-    welded[vertex] = representative;
+    if (nearest >= 0) union(vertex, nearest);
+    const root = find(vertex);
     const key = `${cx}:${cy}:${cz}`;
     const bucket = buckets.get(key) ?? [];
-    bucket.push(representative);
+    if (!bucket.includes(root)) bucket.push(root);
     buckets.set(key, bucket);
   }
+  const welded = new Array<number>(vertexCount);
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) welded[vertex] = find(vertex);
+  // Área degenerada relativa à escala (antes: EPSILON absoluto).
+  const minAreaSq = Math.max(diagonal * diagonal * 1e-16, EPSILON);
   const valid: number[] = [];
   for (const triangle of triangles) {
     const normalizedTriangle = triangle.map((index) => welded[index] ?? -1);
@@ -176,7 +219,7 @@ export function normalizeTriangles(
     const nx = aby * acz - abz * acy;
     const ny = abz * acx - abx * acz;
     const nz = abx * acy - aby * acx;
-    if (nx * nx + ny * ny + nz * nz <= EPSILON) continue;
+    if (nx * nx + ny * ny + nz * nz <= minAreaSq * 4) continue;
     valid.push(a, b, c);
   }
   return compactMesh(positions, valid, format);

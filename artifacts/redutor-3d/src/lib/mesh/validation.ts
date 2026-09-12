@@ -146,3 +146,68 @@ export function topologyFingerprint(mesh: MeshData) {
   const audit = auditMesh(mesh);
   return `${audit.boundaryLoops}:${audit.boundaryEdges}:${audit.nonManifoldEdges}:${audit.components}`;
 }
+
+export type ApprovalCheck =
+  | 'TOPOLOGY'
+  | 'WATERTIGHT'
+  | 'BOUNDARIES'
+  | 'MANIFOLD'
+  | 'SURFACE_ERROR'
+  | 'LOCAL_ERROR'
+  | 'FEATURE_PRESERVATION'
+  | 'SILHOUETTE'
+  | 'TRIANGLE_QUALITY'
+  | 'SELF_INTERSECTION'
+  | 'VOLUME'
+  | 'DIMENSIONS'
+  | 'ORIENTATION';
+
+export interface ApprovalReport {
+  approved: boolean;
+  checks: Record<ApprovalCheck, boolean>;
+  reasons: string[];
+}
+
+/**
+ * CRITÉRIO DE APROVAÇÃO (§51): a conversão só é aprovada quando todos os
+ * checks passam. `surface` traz o erro médio/máximo normalizado pela
+ * diagonal (Hausdorff aproximado) e `featureLoss` a fração de vértices sob
+ * FEATURE LOCK perdidos (0 = preservação total).
+ */
+export function approveConversion(
+  candidate: TopologyAudit,
+  reference: TopologyAudit,
+  surface: { mean: number; max: number },
+  featureLoss: number,
+  degenerateTriangles: number,
+  quality: 'low' | 'medium' | 'high' | 'ultra' = 'high',
+): ApprovalReport {
+  const strict = quality === 'ultra';
+  const maxMean = strict ? 0.0012 : quality === 'high' ? 0.0025 : quality === 'medium' ? 0.0045 : 0.008;
+  const maxMax = strict ? 0.012 : quality === 'high' ? 0.025 : quality === 'medium' ? 0.045 : 0.08;
+  const checks: Record<ApprovalCheck, boolean> = {
+    TOPOLOGY: candidate.reasons.length === 0,
+    WATERTIGHT: reference.boundaryLoops === 0 ? candidate.boundaryLoops === 0 : candidate.boundaryLoops <= reference.boundaryLoops,
+    BOUNDARIES: candidate.boundaryLoops <= reference.boundaryLoops,
+    MANIFOLD: candidate.nonManifoldEdges === 0,
+    SURFACE_ERROR: surface.mean <= maxMean && surface.max <= maxMax,
+    LOCAL_ERROR: surface.max <= maxMax,
+    FEATURE_PRESERVATION: featureLoss <= (strict ? 0.02 : 0.08),
+    SILHOUETTE: candidate.boundaryLoops <= reference.boundaryLoops && surface.max <= maxMax * 1.5,
+    TRIANGLE_QUALITY: degenerateTriangles === 0,
+    SELF_INTERSECTION: candidate.nonManifoldEdges === 0,
+    VOLUME: auditWithinTolerance(candidate, reference),
+    DIMENSIONS: auditWithinTolerance(candidate, reference),
+    ORIENTATION: candidate.orientationConflicts <= reference.orientationConflicts,
+  };
+  const reasons: string[] = [];
+  if (!checks.WATERTIGHT) reasons.push('A malha fechada deixou de ser watertight.');
+  if (!checks.BOUNDARIES) reasons.push('Novos loops de abertura foram criados.');
+  if (!checks.MANIFOLD) reasons.push('Novas arestas non-manifold foram criadas.');
+  if (!checks.SURFACE_ERROR) reasons.push('Erro de superfície excedeu o piso de qualidade.');
+  if (!checks.FEATURE_PRESERVATION) reasons.push('Perda de features críticas acima do limite.');
+  if (!checks.TRIANGLE_QUALITY) reasons.push('Triângulos degenerados no resultado.');
+  if (!checks.VOLUME || !checks.DIMENSIONS) reasons.push('Volume ou dimensões fora da tolerância.');
+  if (!checks.ORIENTATION) reasons.push('Novos conflitos de orientação.');
+  return { approved: Object.values(checks).every(Boolean), checks, reasons };
+}

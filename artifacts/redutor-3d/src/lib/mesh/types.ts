@@ -87,6 +87,13 @@ export type WorkerProgressPhase =
   | 'validating'
   | 'exporting';
 
+export type ConversionStage =
+  | 'ANALISANDO'
+  | 'IDENTIFICANDO_FEATURES'
+  | 'OTIMIZANDO'
+  | 'VALIDANDO'
+  | 'FINALIZANDO';
+
 export interface WorkerProgress {
   type: 'progress';
   phase: WorkerProgressPhase;
@@ -96,6 +103,12 @@ export interface WorkerProgress {
   elapsedMs?: number;
   originalTriangles?: number;
   targetTriangles?: number;
+  /** Triângulos no estado atual (para % de redução em tempo real). */
+  currentTriangles?: number;
+  /** Etapa do pipeline (§55): ANALISANDO → IDENTIFICANDO FEATURES → OTIMIZANDO → VALIDANDO → FINALIZANDO. */
+  stage?: ConversionStage;
+  /** Tamanho original do arquivo em bytes. */
+  originalBytes?: number;
 }
 
 export interface WorkerSuccess {

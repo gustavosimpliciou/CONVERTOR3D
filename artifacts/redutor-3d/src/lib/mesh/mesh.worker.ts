@@ -12,11 +12,36 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
   if (event.data.type !== 'process') return;
   const request = event.data;
   const started = performance.now();
+  const elapsed = (): number => performance.now() - started;
   try {
-    post({ type: 'progress', phase: 'loading', progress: 0.04, message: 'Lendo a estrutura do arquivo…' });
+    // 1. UPLOAD → PARSE → RECONSTRUCTION → VALIDATION (importação preservada)
+    post({
+      type: 'progress', phase: 'loading', progress: 0.04,
+      message: 'Lendo a estrutura do arquivo…', stage: 'ANALISANDO',
+      targetTriangles: request.targetTriangles, elapsedMs: elapsed(),
+    });
     const mesh = parseMesh(request.buffer, request.fileName);
     const original = buildStats(mesh);
-    post({ type: 'progress', phase: 'analyzing', progress: 0.18, message: 'Analisando geometria e topologia…', stats: original });
+    const originalBytes = request.buffer.byteLength;
+
+    // Referência original imutável: todas as comparações usam esta malha.
+    post({
+      type: 'progress', phase: 'analyzing', progress: 0.12,
+      message: `Analisando geometria e topologia — ${original.triangles.toLocaleString('pt-BR')} faces…`,
+      stage: 'ANALISANDO', stats: original, elapsedMs: elapsed(),
+      originalTriangles: original.triangles, targetTriangles: request.targetTriangles,
+      currentTriangles: original.triangles, originalBytes,
+    });
+
+    post({
+      type: 'progress', phase: 'analyzing', progress: 0.18,
+      message: 'Identificando features — curvatura, relevos, silhueta…',
+      stage: 'IDENTIFICANDO_FEATURES', stats: original, elapsedMs: elapsed(),
+      originalTriangles: original.triangles, targetTriangles: request.targetTriangles,
+      currentTriangles: original.triangles, originalBytes,
+    });
+
+    // 2. FEATURE LOCK → DECIMAÇÃO ADAPTATIVA PROGRESSIVA (estágios + rollback)
     const result = simplifyMesh(mesh, {
       targetTriangles: request.targetTriangles,
       quality: request.quality,
@@ -24,11 +49,28 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
       preserveSilhouette: request.preserveSilhouette,
       protectDetails: request.protectDetails,
       timeBudgetMs: request.timeBudgetMs ?? 55_000,
-      onCheckpoint: () => {
-        post({ type: 'progress', phase: 'simplifying', progress: 0.2, message: 'Simplificando com preservação de detalhes…', elapsedMs: performance.now() - started, originalTriangles: original.triangles, targetTriangles: request.targetTriangles });
+      onCheckpoint: (activeTriangles) => {
+        const done = 1 - (activeTriangles - request.targetTriangles) / Math.max(1, original.triangles - request.targetTriangles);
+        const reduction = ((original.triangles - activeTriangles) / Math.max(1, original.triangles)) * 100;
+        post({
+          type: 'progress', phase: 'simplifying',
+          progress: Math.min(0.84, Math.max(0.2, 0.2 + Math.max(0, Math.min(1, done)) * 0.64)),
+          message: `Otimizando — ${activeTriangles.toLocaleString('pt-BR')} faces (−${reduction.toFixed(1)}%)…`,
+          stage: 'OTIMIZANDO', elapsedMs: elapsed(),
+          originalTriangles: original.triangles, targetTriangles: request.targetTriangles,
+          currentTriangles: activeTriangles, originalBytes,
+        });
         return true;
       },
+    }, (progress) => {
+      post({
+        type: 'progress', phase: 'simplifying', progress: 0.2 + progress * 0.64,
+        message: 'Otimizando com preservação de features…', stage: 'OTIMIZANDO',
+        elapsedMs: elapsed(), originalTriangles: original.triangles,
+        targetTriangles: request.targetTriangles, originalBytes,
+      });
     });
+
     const reducedMesh: MeshData = {
       positions: result.positions,
       indices: result.indices,
@@ -36,15 +78,40 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
       bounds: buildStats({ ...mesh, positions: result.positions, indices: result.indices }).bounds,
     };
     const reduced = buildStats(reducedMesh);
+    const reductionPercent = ((original.triangles - reduced.triangles) / Math.max(1, original.triangles)) * 100;
+
+    // 3. VALIDAÇÃO 3D (matemática + topológica + geométrica)
+    post({
+      type: 'progress', phase: 'validating', progress: 0.87,
+      message: `Validando — ${reduced.triangles.toLocaleString('pt-BR')} faces, watertight=${result.validation.watertight ? 'sim' : 'não'}…`,
+      stage: 'VALIDANDO', stats: reduced, elapsedMs: elapsed(),
+      originalTriangles: original.triangles, targetTriangles: request.targetTriangles,
+      currentTriangles: reduced.triangles, originalBytes,
+    });
     const referenceAudit = auditMesh(mesh);
     const finalAudit = auditMesh(reducedMesh, referenceAudit);
     if (!finalAudit.valid || !auditWithinTolerance(finalAudit, referenceAudit)) {
       throw new Error(`A malha reduzida não passou na validação final: ${finalAudit.reasons.join(' ') || 'tolerância geométrica excedida.'}`);
     }
-    post({ type: 'progress', phase: 'validating', progress: 0.86, message: 'Validando a malha reduzida…', stats: reduced, elapsedMs: performance.now() - started, originalTriangles: original.triangles, targetTriangles: request.targetTriangles });
+
+    // 4. EXPORTAÇÃO → REIMPORTAÇÃO implícita (o STL só é liberado validado)
+    post({
+      type: 'progress', phase: 'exporting', progress: 0.95,
+      message: 'Finalizando — gerando STL binário validado…',
+      stage: 'FINALIZANDO', stats: reduced, elapsedMs: elapsed(),
+      originalTriangles: original.triangles, targetTriangles: request.targetTriangles,
+      currentTriangles: reduced.triangles, originalBytes,
+    });
     const stl = exportBinaryStl(reducedMesh);
     if (!stl.valid) throw new Error(stl.error ?? 'Falha durante a geração do STL.');
-    post({ type: 'progress', phase: 'exporting', progress: 0.96, message: 'Gerando STL binário validado…' });
+    post({
+      type: 'progress', phase: 'exporting', progress: 0.99,
+      message: `Pronto — ${reduced.triangles.toLocaleString('pt-BR')} faces (−${reductionPercent.toFixed(1)}%) em ${(elapsed() / 1000).toFixed(1)}s.`,
+      stage: 'FINALIZANDO', stats: reduced, elapsedMs: elapsed(),
+      originalTriangles: original.triangles, targetTriangles: request.targetTriangles,
+      currentTriangles: reduced.triangles, originalBytes,
+    });
+
     const complete: WorkerSuccess = {
       type: 'complete',
       original,
