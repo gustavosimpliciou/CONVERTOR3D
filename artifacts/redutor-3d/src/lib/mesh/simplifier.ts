@@ -42,7 +42,7 @@ import {
   validateResultTriangles,
 } from './safeguards';
 import type { TriangleValidationStats } from './safeguards';
-import type { MeshData, SimplifyOptions, SimplifyResult } from './types';
+import type { MeshData, ReductionProfile, SimplifyOptions, SimplifyResult } from './types';
 
 type Quadric = [number, number, number, number, number, number, number, number, number, number];
 
@@ -180,6 +180,11 @@ function paramsFor(options: SimplifyOptions): EngineParams {
     base = { ...legacyFloor, floorMean: 0.0025, floorMax: 0.025, volMax: 2.5, bndMax: 1.2, driftN: 0.008, lockGate: 4e-4, silhouetteMax: 0.02, normalMax: 0.035, curvatureMax: 0.05, dotCrit: 0.75, dotMicro: 0.6, aspectCrit: 4, aspectMicro: 6 };
   } else if (options.profile === 'aggressive') {
     base = { ...legacyFloor, floorMean: 0.006, floorMax: 0.06, volMax: 6, bndMax: 3, driftN: 0.02, lockGate: 2e-3, silhouetteMax: 0.045, normalMax: 0.06, curvatureMax: 0.09, dotCrit: 0.7, dotMicro: 0.55, aspectCrit: 6, aspectMicro: 8 };
+  } else if (options.profile === 'maximum') {
+    // MAXIMUM: busca o menor tamanho sem destruir a identidade. Pisos de
+    // erro maiores, mas guardrails topológicos NUNCA relaxam (sem buracos,
+    // sem flips, sem non-manifold — esses vetos são absolutos).
+    base = { ...legacyFloor, floorMean: 0.012, floorMax: 0.1, volMax: 9, bndMax: 4.5, driftN: 0.035, lockGate: 6e-3, silhouetteMax: 0.07, normalMax: 0.09, curvatureMax: 0.12, dotCrit: 0.65, dotMicro: 0.5, aspectCrit: 8, aspectMicro: 10 };
   } else {
     base = { ...legacyFloor, driftN: legacyDrift, lockGate: legacyLock, silhouetteMax: Infinity, normalMax: Infinity, curvatureMax: Infinity, dotCrit: 0.75, dotMicro: 0.6, aspectCrit: 4, aspectMicro: 6 };
   }
@@ -225,7 +230,9 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
   const originalTriangles = mesh.indices.length / 3;
   const target = Math.max(4, Math.floor(options.targetTriangles));
   const referenceAudit = auditMesh(mesh);
-  const P = paramsFor(options);
+  let P = paramsFor(options);
+  /** Perfil efetivo (sobe na cascata quando o estágio trava). */
+  let curProfile: ReductionProfile | undefined = options.profile;
   const timedOut = (): boolean => performance.now() >= deadline;
   // Métricas do último estágio validado (para o relatório final).
   const lastMetrics = { mean: 0, max: 0, silhouette: 0, normal: 0, curvature: 0 };
@@ -298,6 +305,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
         degenerateTriangles: outputAudit.degenerateTriangles,
         stoppedReason,
         escalations,
+        effectiveProfile: curProfile ?? undefined,
       },
     };
   };
@@ -439,7 +447,20 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     boundsSize: referenceAudit.bounds.size,
   });
   const diagonal = Math.max(complexity.diagonal, 1e-12);
-  const minArea = Math.max(complexity.avgFaceArea * 1e-4, diagonal * diagonal * 1e-14);
+  // Piso ABSOLUTO de área (2e-6): a auditoria considera degenerada qualquer
+  // face com área ≤ 5e-7 (area² ≤ 1e-12, fixo). Sem este piso, malhas finas
+  // (avgFaceArea pequeno) criariam faces que passam no gate relativo mas
+  // reprovam na auditoria — mismatch que travava scans sem dano real.
+  const minArea = Math.max(complexity.avgFaceArea * 1e-4, diagonal * diagonal * 1e-14, 2e-6);
+  const regionInitial = [0, 0, 0, 0, 0];
+  const regionRemoved = [0, 0, 0, 0, 0];
+  // Contagem inicial de faces por classe de região (base das cotas).
+  for (let t = 0; t < originalTriangles; t += 1) {
+    const r0 = complexity.region[tri[t * 3]] ?? 0;
+    const r1 = complexity.region[tri[t * 3 + 1]] ?? 0;
+    const r2 = complexity.region[tri[t * 3 + 2]] ?? 0;
+    regionInitial[Math.max(r0, r1, r2)] += 1;
+  }
   const qemScale = Math.max(complexity.avgFaceArea, 1e-24);
   onProgress?.(0.02);
 
@@ -475,7 +496,26 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       }
     }
   }
-  const driftCapNormalBase = P.driftN * diagonal;
+  let driftCapNormalBase = P.driftN * diagonal;
+
+  /** Próximo perfil da cascata (null = teto atingido ou modo legado). */
+  const nextProfile = (profile: ReductionProfile | undefined): ReductionProfile | null => {
+    if (profile === 'quality') return 'balanced';
+    if (profile === 'balanced') return 'aggressive';
+    if (profile === 'aggressive') return 'maximum';
+    return null;
+  };
+
+  /** Aplica novo perfil em tempo de execução (cascata, sem rebuild). */
+  const applyProfile = (next: ReductionProfile): void => {
+    curProfile = next;
+    P = paramsFor({ ...options, profile: next });
+    impQuality = impQualityFor(next);
+    regionQuota = quotaFor(next);
+    driftCapNormalBase = P.driftN * diagonal;
+    planeMult = 1;
+  };
+  let profileEscalations = 0;
 
   const heap = new MinHeap();
   const localEdgeLength = (vertex: number): number => {
@@ -497,16 +537,50 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     return count > 0 ? sum / count : complexity.avgEdgeLength;
   };
 
+  // Agressividade do custo por perfil: quality protege muito, maximum
+  // protege menos (mas nunca zero — features sempre custam mais).
+  const impQualityFor = (profile: ReductionProfile | undefined): SimplifyOptions['quality'] =>
+    !profile
+      ? options.quality
+      : profile === 'quality'
+        ? 'ultra'
+        : profile === 'balanced'
+          ? 'high'
+          : profile === 'aggressive'
+            ? 'medium'
+            : 'low';
+  let impQuality = impQualityFor(curProfile);
+
+  // Orçamento de triângulos por região (TRIANGLE BUDGET): cotas de remoção
+  // por classe — áreas simples financiam a redução (§11). Quando uma região
+  // estoura sua cota, seus custos sobem e o orçamento migra sozinho.
+  const quotaFor = (profile: ReductionProfile | undefined): number[] =>
+    !profile || profile === 'quality'
+      ? [1, 1, 1, 1, 1]
+      : profile === 'balanced'
+        ? [0.85, 0.6, 0.35, 0.12, 0.06]
+        : profile === 'aggressive'
+          ? [0.92, 0.72, 0.45, 0.18, 0.09]
+          : [0.96, 0.8, 0.55, 0.25, 0.12];
+  let regionQuota = quotaFor(curProfile);
+
   const combinedCost = (a: number, b: number, x: number, y: number, z: number): number => {
     const qa = quadrics[a]; const qb = quadrics[b];
     const qem =
       (qa[0] + qb[0]) * x * x + 2 * (qa[1] + qb[1]) * x * y + 2 * (qa[2] + qb[2]) * x * z + 2 * (qa[3] + qb[3]) * x +
       (qa[4] + qb[4]) * y * y + 2 * (qa[5] + qb[5]) * y * z + 2 * (qa[6] + qb[6]) * y +
       (qa[7] + qb[7]) * z * z + 2 * (qa[8] + qb[8]) * z + (qa[9] + qb[9]);
-    const imp = Math.max(importanceMultiplier(complexity, a, options.quality), importanceMultiplier(complexity, b, options.quality));
+    const imp = Math.max(importanceMultiplier(complexity, a, impQuality), importanceMultiplier(complexity, b, impQuality));
+    // Cota regional: protege classes que já pagaram além da conta.
+    const cls = Math.max(complexity.region[a] ?? 0, complexity.region[b] ?? 0);
+    let quotaMult = 1;
+    if (curProfile && curProfile !== 'quality' && regionInitial[cls] > 0) {
+      const used = regionRemoved[cls] / regionInitial[cls];
+      if (used > regionQuota[cls]) quotaMult = 1 + 4 * (used - regionQuota[cls]);
+    }
     const key = edgeKeyOf(a, b);
     const borderPenalty = (options.preserveSilhouette || mustRemainWatertight) && edgeCounts.get(key) === 1 ? 1000 : 1;
-    return (Math.max(0, qem) / qemScale) * imp * borderPenalty;
+    return (Math.max(0, qem) / qemScale) * imp * quotaMult * borderPenalty;
   };
 
   const pushEdge = (a: number, b: number): void => {
@@ -616,6 +690,55 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     }
     if (!linkCondition(neighA, neighB, shared, a, b)) return reject('link');
 
+    // Aresta non-manifold (3+ faces): colapso nunca é seguro aqui.
+    if ((edgeCounts.get(key) ?? 2) > 2) return reject('nonmanifold-edge');
+
+    // Conectividade LOCAL: o colapso identifica b em a e mata as faces
+    // comuns; nenhum vértice da vizinhança pode ficar desconectado
+    // (fragmentação criaria componentes indevidos + novos loops). BFS
+    // restrita às faces afetadas sobreviventes — nunca global.
+    {
+      const regionFaces = new Set<number>();
+      for (const f of affected) {
+        const i0 = tri[f * 3]; const i1 = tri[f * 3 + 1]; const i2 = tri[f * 3 + 2];
+        const hasA = i0 === a || i1 === a || i2 === a;
+        const hasB = i0 === b || i1 === b || i2 === b;
+        if (hasA && hasB) continue; // face morre no colapso
+        regionFaces.add(f);
+      }
+      const verts = new Set<number>();
+      for (const f of regionFaces) {
+        const i0 = tri[f * 3]; const i1 = tri[f * 3 + 1]; const i2 = tri[f * 3 + 2];
+        for (const v of [i0, i1, i2]) if (v !== b && vertAlive[v]) verts.add(v);
+      }
+      verts.add(a);
+      const seen = new Set<number>([a]);
+      const stack = [a];
+      while (stack.length > 0) {
+        const v = stack.pop() as number;
+        for (const f of vertFaces[v]) {
+          if (!regionFaces.has(f)) continue;
+          const i0 = tri[f * 3] === b ? a : tri[f * 3];
+          const i1 = tri[f * 3 + 1] === b ? a : tri[f * 3 + 1];
+          const i2 = tri[f * 3 + 2] === b ? a : tri[f * 3 + 2];
+          for (const o of [i0, i1, i2]) {
+            if (o !== v && vertAlive[o] && !seen.has(o)) {
+              seen.add(o);
+              stack.push(o);
+            }
+          }
+        }
+      }
+      let connected = true;
+      for (const v of verts) {
+        if (!seen.has(v)) {
+          connected = false;
+          break;
+        }
+      }
+      if (!connected) return reject('fragment');
+    }
+
     // FEATURE LOCK: aresta crítica só colapsa com erro quadrico minúsculo.
     // A severidade é herdada de TODA a vizinhança afetada (§6: "proximidade
     // de outras features") — uma aresta plana colada a um canto vivo usa o
@@ -682,6 +805,10 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
         if (dbg) dbg['cand-displacement'] = (dbg['cand-displacement'] ?? 0) + 1;
         continue;
       }
+      // `a` parado (candidato = posição atual de `a`): faces só-de-`a` não
+      // se movem — pular a revalidação delas destrava a redução perto de
+      // slivers pré-existentes sem perder segurança.
+      const aStatic = p[0] === pos[a * 3] && p[1] === pos[a * 3 + 1] && p[2] === pos[a * 3 + 2];
       if (dbg && (dbg['dumped'] ?? 0) < 6 && p === mid) {
         dbg['dumped'] = (dbg['dumped'] ?? 0) + 1;
         const probe: TriangleValidationStats = {
@@ -702,7 +829,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
         maxAreaRatio: 12,
         maxAspect,
         minArea,
-      })) continue;
+      }, undefined, aStatic)) continue;
       chosen = p;
       break;
     }
@@ -766,6 +893,11 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       if (i0 === i1 || i1 === i2 || i0 === i2) {
         triAlive[f] = 0;
         removedFaces += 1;
+        // Contabiliza a cota da região que pagou por este colapso.
+        const r0 = complexity.region[tri[f * 3]] ?? 0;
+        const r1 = complexity.region[tri[f * 3 + 1]] ?? 0;
+        const r2 = complexity.region[tri[f * 3 + 2]] ?? 0;
+        regionRemoved[Math.max(r0, r1, r2)] += 1;
         continue;
       }
       tri[f * 3] = i0; tri[f * 3 + 1] = i1; tri[f * 3 + 2] = i2;
@@ -819,6 +951,11 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       if (!triAlive[t]) continue;
       const a = tri[t * 3]; const b = tri[t * 3 + 1]; const c = tri[t * 3 + 2];
       if (a === b || b === c || a === c) continue;
+      // TOPOLOGIA SUPREMA: nunca remover faces vivas por qualidade (aspecto).
+      // Slivers pré-existentes fazem parte do estado original; deletá-los
+      // aqui criaria buracos e fragmentos que os colapsos nunca fizeram.
+      // Os gates por operação (aspecto ≤ 8 nas faces movidas, área mínima
+      // relativa) já garantem que NENHUM triângulo ruim é CRIADO.
       const ax = pos[a * 3]; const ay = pos[a * 3 + 1]; const az = pos[a * 3 + 2];
       const bx = pos[b * 3]; const by = pos[b * 3 + 1]; const bz = pos[b * 3 + 2];
       const cx = pos[c * 3]; const cy = pos[c * 3 + 1]; const cz = pos[c * 3 + 2];
@@ -828,8 +965,6 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       const ny = abz * acx - abx * acz;
       const nz = abx * acy - aby * acx;
       if (nx * nx + ny * ny + nz * nz <= 1e-24) continue;
-      const aspect = triangleAspect(ax, ay, az, bx, by, bz, cx, cy, cz);
-      if (!(aspect <= 12)) continue;
       outIdx.push(remap.get(a) as number, remap.get(b) as number, remap.get(c) as number);
     }
     return { positions: new Float32Array(outPos), indices: new Uint32Array(outIdx) };
@@ -934,8 +1069,6 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     curvature: number;
   }
 
-  const tolForVolume = options.profile ? P.bndMax / 100 : 0.025;
-
   const validateStage = (candidate: { positions: Float32Array; indices: Uint32Array }): StageCheck => {
     const reasons: string[] = [];
     const candidateMesh: MeshData = {
@@ -947,6 +1080,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     const audit = auditMesh(candidateMesh, referenceAudit);
     reasons.push(...audit.reasons);
     if (!audit.valid) return { ok: false, kind: 'topology', reasons, mean: 0, max: 0, silhouette: 0, normal: 0, curvature: 0 };
+    const tolForVolume = curProfile ? P.bndMax / 100 : 0.025;
     if (!auditWithinTolerance(audit, referenceAudit, tolForVolume)) {
       reasons.push('Volume ou dimensões excederam a tolerância do estágio.');
       return { ok: false, kind: 'metric', reasons, mean: 0, max: 0, silhouette: 0, normal: 0, curvature: 0 };
@@ -1096,21 +1230,37 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
         onProgress?.(Math.min(0.97, Math.max(0.03, 0.05 + overall * 0.85)));
         break;
       }
-      // Sem progresso (<2% do necessário)? Escala agressividade de forma
-      // limitada (áreas simples pagam mais) e tenta de novo. Falha
-      // topológica nunca escala: faz rollback imediato.
+      // Sem progresso (<2% do necessário)? Cascata de estratégias (§26-27):
+      // 1) relaxa teto por plano (áreas simples pagam mais); 2) sobe o
+      // perfil (balanced→aggressive→maximum), registrado no log — nunca
+      // falha silenciosamente. Falha topológica nunca escala: rollback.
       const made = stageStartActive - activeTriangles;
       const needed = Math.max(1, stageStartActive - stageTarget);
-      if (check.kind === 'metric' && made < needed * 0.02 && escalations < 2 && attempts < 2 && !timedOut()) {
-        escalations += 1;
-        planeMult *= 1.6;
-        attempts += 1;
-        continue;
+      if (check.kind === 'metric' && made < needed * 0.02 && !timedOut()) {
+        if (escalations < 2 && attempts < 2) {
+          escalations += 1;
+          planeMult *= 1.6;
+          attempts += 1;
+          continue;
+        }
+        const next = nextProfile(curProfile);
+        if (next && profileEscalations < 3) {
+          profileEscalations += 1;
+          applyProfile(next);
+          warnings.push(
+            `Estratégia ${profileEscalations + 1}: perfil ${next} (estágio ${stage + 1} travou em ${activeTriangles.toLocaleString('pt-BR')} faces; motivo: ${check.reasons[0] ?? 'limite de qualidade'}).`,
+          );
+          attempts = 0;
+          continue;
+        }
       }
       warnings.push(`Estágio ${stage + 1}/${totalStages} rejeitado pela validação: ${check.reasons.join(' ')}`);
       qualityBlocked = true;
       stoppedReason = 'quality';
       failed = true;
+      if ((globalThis as Record<string, unknown>).__MESH_DEBUG) {
+        console.error(`[stage-reject] stage=${stage} totalStages=${totalStages} targets=${JSON.stringify(targets)} active=${activeTriangles} kind=${check.kind}`);
+      }
       break; // mantém o melhor estado válido (target flexível)
     }
     if (failed || stoppedSafely || timedOut()) break;
@@ -1123,6 +1273,47 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     stoppedReason = qualityBlocked ? 'quality' : 'stall';
   }
 
+  /**
+   * FAIRING curvature-aware (uma passada, conservadora): relaxamento
+   * tangencial APENAS em regiões planas/curvas, limitado pela deriva,
+   * revalidado integralmente. Se reprovar, bestValid (cópias) prevalece —
+   * nada se perde. Nunca toca features, nunca é global, nunca esconde
+   * defeito (só roda sobre estado já validado).
+   */
+  const fairingPass = (): StageCheck | null => {
+    if (activeTriangles !== bestValid.triangles) return null;
+    const touched = new Set<number>();
+    let moved = 0;
+    for (let v = 0; v < vertexCount && moved < 20000; v += 1) {
+      if (!vertAlive[v]) continue;
+      if ((complexity.region[v] ?? 0) >= RegionClass.AltaCurvatura) continue;
+      const neighbors = neighborsOf(v);
+      if (neighbors.size < 3) continue;
+      let cx = 0; let cy = 0; let cz = 0;
+      for (const o of neighbors) {
+        cx += pos[o * 3]; cy += pos[o * 3 + 1]; cz += pos[o * 3 + 2];
+      }
+      cx /= neighbors.size; cy /= neighbors.size; cz /= neighbors.size;
+      const nx = origNormals[v * 3]; const ny = origNormals[v * 3 + 1]; const nz = origNormals[v * 3 + 2];
+      const nl = Math.hypot(nx, ny, nz);
+      if (!(nl > 0.5)) continue;
+      let dx = (cx - pos[v * 3]) * 0.2;
+      let dy = (cy - pos[v * 3 + 1]) * 0.2;
+      let dz = (cz - pos[v * 3 + 2]) * 0.2;
+      const dn = (dx * nx + dy * ny + dz * nz) / (nl * nl);
+      dx -= dn * nx; dy -= dn * ny; dz -= dn * nz;
+      const qx = pos[v * 3] + dx; const qy = pos[v * 3 + 1] + dy; const qz = pos[v * 3 + 2] + dz;
+      if (!driftAllowed(v, qx, qy, qz, 0.5)) continue;
+      pos[v * 3] = qx; pos[v * 3 + 1] = qy; pos[v * 3 + 2] = qz;
+      vertVersion[v] += 1;
+      for (const f of vertFaces[v]) touched.add(f);
+      moved += 1;
+    }
+    if (moved === 0) return null;
+    refreshFaceNormals(touched);
+    return validateStage(buildCompact());
+  };
+
   if (bestStageReached < 0) {
     // Nenhum estágio avançou com segurança: devolve o melhor esforço validado.
     const compact = buildCompact();
@@ -1134,6 +1325,19 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       lastMetrics.silhouette = check.silhouette;
       lastMetrics.normal = check.normal;
       lastMetrics.curvature = check.curvature;
+    }
+  } else if (bestValid.triangles < originalTriangles && bestValid.triangles > target) {
+    // Polimento opcional quando o alvo não foi atingido: tenta melhorar a
+    // distribuição sem mudar a contagem de faces.
+    const polished = fairingPass();
+    if (polished && polished.ok) {
+      const compact = buildCompact();
+      bestValid = { positions: compact.positions, indices: compact.indices, triangles: compact.indices.length / 3 };
+      lastMetrics.mean = polished.mean;
+      lastMetrics.max = polished.max;
+      lastMetrics.silhouette = polished.silhouette;
+      lastMetrics.normal = polished.normal;
+      lastMetrics.curvature = polished.curvature;
     }
   }
 

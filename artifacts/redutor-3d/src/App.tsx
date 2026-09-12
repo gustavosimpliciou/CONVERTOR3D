@@ -203,8 +203,8 @@ function ProcessingView({ progress, message, elapsedMs, stage, originalTriangles
   return <div className="mx-auto grid min-h-[calc(100dvh-66px)] max-w-[1320px] grid-cols-1 content-center gap-6 px-5 py-10 md:px-10 lg:grid-cols-[1fr_370px]"><div className="panel relative min-h-[470px] overflow-hidden bg-black/25 p-8 md:p-12"><div className="pointer-events-none absolute inset-0 flex items-center justify-center"><div className="border border-orange-400/25 bg-black/75 px-5 py-4 backdrop-blur-sm"><div className="flex items-center gap-3"><LoaderCircle size={16} className="spinner text-orange-400" /><span className="eyebrow text-orange-300">{message}</span></div></div></div></div><div className="flex flex-col justify-center"><div className="eyebrow mb-3 text-orange-400/80">02 / processamento · {STAGE_LABELS[stage]}</div><div className="mono mb-3 text-xs text-orange-300">{Math.min(60, elapsedMs / 1000).toFixed(1)}s / 60s</div><h1 className="text-3xl font-medium tracking-[-.04em]">A forma está sendo<br /><span className="text-stone-500">recalculada.</span></h1><p className="mt-4 text-sm leading-6 text-stone-500">O Redutor está analisando a topologia e redistribuindo a malha no seu dispositivo.</p><div className="mono mt-4 grid grid-cols-3 gap-2 border border-white/[.06] bg-black/20 px-3 py-2 text-[10px]"><span className="text-stone-600">orig <span className="text-stone-300">{formatCount(originalTriangles)}</span></span><span className="text-stone-600">atual <span className="text-orange-300">{formatCount(currentTriangles)}</span></span><span className="text-stone-600">alvo <span className="text-stone-300">{formatCount(targetTriangles)}</span> · −{reduction.toFixed(1)}%</span></div><div className="mt-10"><div className="mb-2 flex items-end justify-between"><span className="mono text-[11px] text-stone-600">progresso local</span><span className="mono text-2xl text-orange-300" data-testid="text-processing-progress">{Math.round(progress)}%</span></div><div className="h-1 bg-stone-800"><div className="h-1 bg-orange-400 transition-[width] duration-150" style={{ width: `${progress}%` }} /></div><div className="mt-4 grid grid-cols-5 gap-2 text-[10px] text-stone-600">{STAGES.map((step, index) => <span key={step} className={index <= stageIndex ? 'text-orange-300' : ''}>{STAGE_LABELS[step]}</span>)}</div></div><button className="button-secondary mt-10 flex h-10 items-center justify-center gap-2 text-xs" onClick={onCancel} data-testid="button-cancel-processing"><Pause size={14} /> Cancelar processamento</button><div className="mt-5 flex items-center gap-2 text-[10px] text-stone-600"><LockKeyhole size={12} /> nada é enviado para a nuvem</div></div></div>;
 }
 
- function ErrorState({ message, onReset }: { message: string; onReset: () => void }) {
-  return <main className="mx-auto flex min-h-[calc(100dvh-66px)] max-w-[720px] flex-col items-center justify-center px-5 text-center"><div className="mb-5 flex h-14 w-14 items-center justify-center border border-red-400/35 bg-red-500/[.08] text-red-300"><FileWarning size={24} /></div><div className="eyebrow mb-3 text-red-300/80">entrada recusada</div><h1 className="text-3xl font-medium tracking-[-.04em]">Esse arquivo não pôde ser lido.</h1><p className="mt-3 max-w-md text-sm leading-6 text-stone-500" data-testid="status-file-error">{message}</p><div className="mt-8 flex gap-2"><button className="button-primary flex h-10 items-center gap-2 px-4 text-xs font-semibold" onClick={onReset} data-testid="button-try-again"><RefreshCw size={14} /> Tentar outro arquivo</button></div><p className="mt-6 mono text-[10px] text-stone-700">formatos aceitos / .STL .OBJ .PLY .OFF .GLB .GLTF .FBX .DAE</p></main>;
+  function ErrorState({ message, onReset, title }: { message: string; onReset: () => void; title?: string }) {
+  return <main className="mx-auto flex min-h-[calc(100dvh-66px)] max-w-[720px] flex-col items-center justify-center px-5 text-center"><div className="mb-5 flex h-14 w-14 items-center justify-center border border-red-400/35 bg-red-500/[.08] text-red-300"><FileWarning size={24} /></div><div className="eyebrow mb-3 text-red-300/80">entrada recusada</div><h1 className="text-3xl font-medium tracking-[-.04em]">{title ?? 'Esse arquivo não pôde ser lido.'}</h1><p className="mt-3 max-w-md text-sm leading-6 text-stone-500" data-testid="status-file-error">{message}</p><div className="mt-8 flex gap-2"><button className="button-primary flex h-10 items-center gap-2 px-4 text-xs font-semibold" onClick={onReset} data-testid="button-try-again"><RefreshCw size={14} /> Tentar outro arquivo</button></div><p className="mt-6 mono text-[10px] text-stone-700">formatos aceitos / .STL .OBJ .PLY .OFF .GLB .GLTF .FBX .DAE</p></main>;
 }
 
 function ImportingView({ progress, message }: { progress: number; message: string }) {
@@ -456,19 +456,22 @@ type ReducedResult = {
 const PROFILE_LABELS: Record<ReductionProfile, { title: string; caption: string }> = {
   quality: { title: 'Qualidade', caption: 'fidelidade máxima' },
   balanced: { title: 'Balanceado', caption: '~50% menor' },
-  aggressive: { title: 'Agressivo', caption: 'máximo + vigiado' },
+  aggressive: { title: 'Agressivo', caption: '60–70% + vigiado' },
+  maximum: { title: 'Máximo', caption: 'menor possível' },
 };
 
 const PROFILE_QUALITY: Record<ReductionProfile, Quality> = {
   quality: 'ultra',
   balanced: 'high',
   aggressive: 'medium',
+  maximum: 'medium',
 };
 
 const PROFILE_SIL_LIMIT: Record<ReductionProfile, number> = {
   quality: 0.012,
   balanced: 0.02,
   aggressive: 0.045,
+  maximum: 0.07,
 };
 
 /** Meta % do TAMANHO → alvo de faces (STL binário: 84 + 50 bytes/face). */
@@ -600,7 +603,7 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
       <div className="animate-in-delay"><Dropzone onFiles={handleFiles} inputRef={inputRef} accept=".stl,model/stl" formatsLabel="STL BINÁRIO · STL ASCII" /></div>
       <div className="mt-6 grid grid-cols-1 gap-px border border-white/[.06] bg-white/[.06] sm:grid-cols-3 animate-in-delay">{[{ icon: ScanLine, title: 'Mapa de importância', copy: 'Cada região recebe um peso geométrico.' }, { icon: ShieldCheck, title: 'Features protegidas', copy: 'Olhos, dedos e relevos sob lock.' }, { icon: FileBox, title: 'STL pronto', copy: 'Saída válida para o slicer.' }].map(({ icon: Icon, title, copy }) => <div key={title} className="bg-stone-950/75 p-4"><Icon size={15} className="mb-3 text-orange-400" /><div className="text-xs font-medium">{title}</div><div className="mt-1 text-[11px] text-stone-600">{copy}</div></div>)}</div>
     </main>}
-    {phase === 'error' && <><input ref={inputRef} type="file" accept=".stl,model/stl" className="hidden" onChange={(event) => handleFiles(event.target.files)} data-testid="input-error-file" /><ErrorState message={error} onReset={() => inputRef.current?.click()} /></>}
+    {phase === 'error' && <><input ref={inputRef} type="file" accept=".stl,model/stl" className="hidden" onChange={(event) => handleFiles(event.target.files)} data-testid="input-error-file" /><ErrorState message={error} onReset={() => inputRef.current?.click()} title={error.includes('redução segura') ? 'Nenhuma redução segura foi possível.' : undefined} /></>}
     {phase === 'importing' && <ImportingView progress={progress} message={message} />}
     {phase === 'reducing' && model && <ProcessingView progress={progress} message={message} elapsedMs={elapsedMs} stage={stage} originalTriangles={liveOriginal || model.stats.triangles} currentTriangles={liveTriangles || model.stats.triangles} targetTriangles={targetFaces} onCancel={cancel} />}
     {phase === 'ready' && model && <main className="relative mx-auto max-w-[1480px] px-4 py-5 md:px-7 lg:px-10">
@@ -619,7 +622,7 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
         </section>
         <section className="panel flex flex-col gap-4 p-4" aria-label="Meta e perfil">
           <MetaSelect target={targetPercent} onChange={setTargetPercent} />
-          <div><div className="mb-2 text-xs text-stone-400">Perfil de qualidade</div><div className="grid grid-cols-3 gap-1">{(Object.keys(PROFILE_LABELS) as ReductionProfile[]).map((option) => <button key={option} className={`border px-2 py-2 text-left transition ${profile === option ? 'border-orange-400/60 bg-orange-500/10 text-orange-300' : 'border-white/[.07] bg-black/10 text-stone-500 hover:border-white/20'}`} onClick={() => setProfile(option)} data-testid={`button-profile-${option}`}><span className="block text-[11px]">{PROFILE_LABELS[option].title}</span><span className="mono text-[9px] text-stone-600">{PROFILE_LABELS[option].caption}</span></button>)}</div></div>
+          <div><div className="mb-2 text-xs text-stone-400">Perfil de qualidade</div><div className="grid grid-cols-2 gap-1">{(Object.keys(PROFILE_LABELS) as ReductionProfile[]).map((option) => <button key={option} className={`border px-2 py-2 text-left transition ${profile === option ? 'border-orange-400/60 bg-orange-500/10 text-orange-300' : 'border-white/[.07] bg-black/10 text-stone-500 hover:border-white/20'}`} onClick={() => setProfile(option)} data-testid={`button-profile-${option}`}><span className="block text-[11px]">{PROFILE_LABELS[option].title}</span><span className="mono text-[9px] text-stone-600">{PROFILE_LABELS[option].caption}</span></button>)}</div></div>
           {!canReduce && <div className="border border-orange-400/20 bg-orange-500/[.06] px-3 py-2 text-xs text-orange-200">A meta não exige redução para este arquivo. Aumente a meta para continuar.</div>}
           <button className="button-primary flex h-10 items-center justify-center gap-2 text-xs font-semibold disabled:opacity-40" onClick={() => void runReduce()} disabled={!canReduce} data-testid="button-reduce"><Zap size={14} /> Comprimir {targetPercent}%</button>
           <p className="text-[10px] leading-4 text-stone-600">Redução adaptativa: áreas simples pagam a conta, features ficam protegidas. O original nunca é alterado.</p>
@@ -666,6 +669,7 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
             <div className="border border-white/[.06] bg-black/20 p-3"><div className="eyebrow mb-1 text-stone-600">faces</div><div className="mono text-sm text-stone-200">{formatCount(reduced.stats.triangles)}</div></div>
           </div>
           <MetaLine label="Geometria" value={fidelity} accent />
+          {reduced.report.effectiveProfile && reduced.report.effectiveProfile !== profile && <MetaLine label="Estratégia final" value={`perfil ${reduced.report.effectiveProfile} (escalonado)`} accent />}
           <MetaLine label="Malha" value={reduced.report.boundaryFinal <= 0 ? 'VÁLIDA' : 'VÁLIDA / bordas originais'} accent />
           <MetaLine label="Watertight" value={reduced.validation.watertight ? 'PASS' : '—'} accent />
           <MetaLine label="Validação" value={valid ? '✓ PASS' : 'REVISAR'} accent />

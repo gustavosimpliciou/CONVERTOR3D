@@ -157,12 +157,17 @@ export function auditMesh(mesh: MeshData, reference?: TopologyAudit): TopologyAu
     bounds: calculateBounds(mesh.positions),
     degenerateTriangles: stats.degenerateTriangles,
     orientationConflicts: countOrientationConflicts(mesh),
-    valid: stats.finite && stats.degenerateTriangles === 0,
+    valid: stats.finite,
     reasons: [],
   };
   // Defeitos pré-existentes fazem parte do estado original e são apenas
   // registrados; a decimação falha somente se CRIAR novos defeitos
   // (FINAL <= ORIGINAL). Sem referência, o estado é reportado como está.
+  // Nota: degeneração também é relativa — o limiar absoluto de área não faz
+  // sentido entre escalas (1e-7 mm² pode ser legítimo num scan fino); o que
+  // importa é não criar triângulos piores que os originais.
+  if (!reference && stats.degenerateTriangles > 0) audit.reasons.push(`A malha contém ${stats.degenerateTriangles} triângulos degenerados.`);
+  if (reference && audit.degenerateTriangles > reference.degenerateTriangles) audit.reasons.push('A operação criaria triângulos degenerados.');
   if (!reference && audit.nonManifoldEdges) audit.reasons.push('A malha contém arestas non-manifold.');
   if (!reference && audit.orientationConflicts) audit.reasons.push('A orientação das faces contém conflitos de winding.');
   if (reference && audit.nonManifoldEdges > reference.nonManifoldEdges) audit.reasons.push('A operação criaria novas arestas non-manifold.');

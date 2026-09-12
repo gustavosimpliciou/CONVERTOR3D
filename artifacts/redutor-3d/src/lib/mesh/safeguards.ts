@@ -114,6 +114,7 @@ export function validateResultTriangles(
   faceNormalOf: (face: number) => [number, number, number],
   options: FlipCheckOptions,
   stats?: TriangleValidationStats,
+  skipStaticA?: boolean,
 ): boolean {
   const [nx, ny, nz] = proposal.position;
   void pos;
@@ -136,6 +137,15 @@ export function validateResultTriangles(
     if (new Set(mapped).size < 3) {
       if (stats) stats.skipped += 1;
       continue; // faces que morrem no colapso
+    }
+    // Faces que continham `a` mas não `b` (índices ORIGINAIS), quando `a`
+    // não se move (candidato = posição atual de `a`): geometricamente
+    // INALTERADAS. Revalidá-las vetaria colapsos por causa de slivers
+    // pré-existentes que não tocamos — travaria a redução em scans sem
+    // nenhum benefício.
+    if (skipStaticA && i0 !== proposal.b && i1 !== proposal.b && i2 !== proposal.b) {
+      if (stats) stats.skipped += 1;
+      continue;
     }
     if (stats) stats.checked += 1;
     const p0 = mapped[0] === proposal.a ? [nx, ny, nz] as [number, number, number] : getVertex(mapped[0]);

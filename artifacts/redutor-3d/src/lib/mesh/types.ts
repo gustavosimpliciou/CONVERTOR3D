@@ -32,7 +32,7 @@ export interface MeshStats {
 export type Quality = 'low' | 'medium' | 'high' | 'ultra';
 
 /** Perfil de redução (fluxo COMPRESSÃO 3D): quality = fidelidade máxima. */
-export type ReductionProfile = 'quality' | 'balanced' | 'aggressive';
+export type ReductionProfile = 'quality' | 'balanced' | 'aggressive' | 'maximum';
 
 /** Limites configuráveis (MAX_*): tetos de erro por operação e estágio. */
 export interface ReductionLimits {
@@ -75,6 +75,7 @@ export interface SimplifyReport {
   degenerateTriangles: number;
   stoppedReason: 'target' | 'quality' | 'time' | 'stall';
   escalations: number;
+  effectiveProfile?: ReductionProfile;
 }
 
 export interface SimplifyResult {
