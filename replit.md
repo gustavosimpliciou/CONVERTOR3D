@@ -39,8 +39,13 @@ Uma ferramenta local para reduzir malhas 3D com preservação geométrica e expo
 
 - O processamento de malha roda em Web Worker para manter a interface responsiva.
 - O arquivo original é reaberto a partir do objeto `File` quando necessário; buffers intermediários são transferidos ao Worker.
-- QEM com colapso de arestas é o caminho principal; uma amostragem espacial de segurança garante o limite máximo em malhas patológicas.
+- Engine `FEATURE-AWARE ADAPTIVE MESH DECIMATION` (`src/lib/mesh/`): a integridade geométrica tem prioridade absoluta sobre o número de faces (target é meta, não autorização para deformar).
+- `complexity.ts` — mapa de complexidade geométrica: curvatura, variação de normais, dihedral angle, densidade local, estrutura fina e silhueta classificam cada vértice (plana/curva/alta/micro/feature-crítica) com FEATURE LOCK nas regiões críticas.
+- `safeguards.ts` — cada edge collapse passa por SIMULATE → VALIDATE → COMMIT/REJECT: link condition, regra de borda (zero novos buracos), flip de normais adaptativo, aspect ratio, teto de deslocamento por plano e Hausdorff aproximado por grade espacial.
+- `simplifier.ts` — custo combinado QEM + curvatura + feature + silhueta + estrutura fina; heap com versionamento (sem entradas obsoletas); controle de deriva acumulada por vértice (componentes normal/tangencial vs. referência imutável); decimação progressiva por estágios com snapshot, rollback e quality floor por preset.
+- Contagens de aresta incrementais exatas (a causa-raiz dos buracos no motor anterior era a reconstrução parcial dessas contagens) e welding controlado com union-find e tolerância proporcional à escala.
 - A exportação padrão é STL binário e só é liberada após validação independente do buffer.
+- Regressão executável: `pnpm --filter @workspace/scripts run validate:decimation` (cubo, esfera, modelo orgânico com microdetalhes, STL round-trip, welding, checklist de aprovação).
 
 ## Product
 

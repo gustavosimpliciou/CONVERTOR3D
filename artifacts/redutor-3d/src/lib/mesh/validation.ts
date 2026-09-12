@@ -124,8 +124,12 @@ export function auditMesh(mesh: MeshData, reference?: TopologyAudit): TopologyAu
     valid: stats.finite && stats.degenerateTriangles === 0,
     reasons: [],
   };
-  if (audit.nonManifoldEdges) audit.reasons.push('A malha contém arestas non-manifold.');
-  if (audit.orientationConflicts) audit.reasons.push('A orientação das faces contém conflitos de winding.');
+  // Defeitos pré-existentes fazem parte do estado original e são apenas
+  // registrados; a decimação falha somente se CRIAR novos defeitos
+  // (FINAL <= ORIGINAL). Sem referência, o estado é reportado como está.
+  if (!reference && audit.nonManifoldEdges) audit.reasons.push('A malha contém arestas non-manifold.');
+  if (!reference && audit.orientationConflicts) audit.reasons.push('A orientação das faces contém conflitos de winding.');
+  if (reference && audit.nonManifoldEdges > reference.nonManifoldEdges) audit.reasons.push('A operação criaria novas arestas non-manifold.');
   if (reference && audit.orientationConflicts > reference.orientationConflicts) audit.reasons.push('A operação criou conflitos de orientação.');
   if (reference && audit.boundaryLoops > reference.boundaryLoops) audit.reasons.push('A operação criaria novos loops de abertura.');
   if (reference && audit.components < reference.components) audit.reasons.push('Um componente da malha seria perdido.');
@@ -137,7 +141,12 @@ export function auditMesh(mesh: MeshData, reference?: TopologyAudit): TopologyAu
 
 export function auditWithinTolerance(candidate: TopologyAudit, reference: TopologyAudit, tolerance = 0.025) {
   const size = Math.max(...reference.bounds.size, 1e-9);
-  const volumeDelta = Math.abs(Math.abs(candidate.volume) - Math.abs(reference.volume)) / Math.max(Math.abs(reference.volume), size ** 3 * 1e-9);
+  // Piso volumétrico: referências com volume degenerado (≈0 por winding
+  // misto ou peças finas/planas) usariam só ruído float como denominador.
+  // O piso equivale a 0.0001% do cubo envolvente — invariante à escala.
+  const volumeDelta =
+    Math.abs(Math.abs(candidate.volume) - Math.abs(reference.volume)) /
+    Math.max(Math.abs(reference.volume), size ** 3 * 1e-6);
   const boundsDelta = Math.max(...candidate.bounds.min.map((v, i) => Math.abs(v - reference.bounds.min[i])), ...candidate.bounds.max.map((v, i) => Math.abs(v - reference.bounds.max[i]))) / size;
   return volumeDelta <= tolerance * 2.5 && boundsDelta <= tolerance;
 }

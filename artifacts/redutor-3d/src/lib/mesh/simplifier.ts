@@ -38,6 +38,7 @@ import {
   triangleAspect,
   validateResultTriangles,
 } from './safeguards';
+import type { TriangleValidationStats } from './safeguards';
 import type { MeshData, SimplifyOptions, SimplifyResult } from './types';
 
 type Quadric = [number, number, number, number, number, number, number, number, number, number];
@@ -196,10 +197,11 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     warnings: string[],
     stoppedSafely: boolean,
   ): SimplifyResult => {
-    const compact = { positions, indices, format: mesh.format, bounds: mesh.bounds };
-    void compact;
     const outTriangles = indices.length / 3;
-    const finalAudit = auditMesh({ positions, indices, format: mesh.format, bounds: mesh.bounds });
+    // Auditoria RELATIVA à referência: defeitos pré-existentes (ex. winding
+    // misto no arquivo de origem) não invalidam uma redução que não criou
+    // nenhum defeito novo. Vale FINAL <= ORIGINAL.
+    const finalAudit = auditMesh({ positions, indices, format: mesh.format, bounds: mesh.bounds }, referenceAudit);
     const safe = finalAudit.valid && auditWithinTolerance(finalAudit, referenceAudit);
     const output = safe ? { positions, indices } : { positions: mesh.positions, indices: mesh.indices };
     const outputAudit = safe ? finalAudit : referenceAudit;
@@ -223,7 +225,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
         nonManifoldEdges: outputAudit.nonManifoldEdges,
         volumeDeltaPercent:
           (Math.abs(Math.abs(outputAudit.volume) - Math.abs(referenceAudit.volume)) /
-            Math.max(Math.abs(referenceAudit.volume), 1e-9)) * 100,
+            Math.max(Math.abs(referenceAudit.volume), Math.max(...referenceAudit.bounds.size, 1e-9) ** 3 * 1e-6)) * 100,
         boundsDeltaPercent:
           (Math.max(
             ...outputAudit.bounds.min.map((v, i) => Math.abs(v - referenceAudit.bounds.min[i])),
@@ -376,6 +378,41 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
   const qemScale = Math.max(complexity.avgFaceArea, 1e-24);
   onProgress?.(0.02);
 
+  // ---------------------------------------------------------------
+  // CONTROLE DE ERRO LOCAL (§22-23): cada vértice sobrevivente carrega sua
+  // posição e normal ORIGINAIS (referência imutável). O deslocamento
+  // acumulado é decomposto em componente normal (fora da superfície — teto
+  // rígido por qualidade/região) e tangencial (deslizamento sobre a
+  // superfície — teto folgado). Nenhuma cadeia de colapsos pode, sozinha,
+  // estourar o piso de qualidade: a deriva total é limitada por construção.
+  // ---------------------------------------------------------------
+  const origNormals = new Float64Array(vertexCount * 3);
+  const initLocalEdge = new Float64Array(vertexCount);
+  {
+    const acc = new Float64Array(vertexCount * 3);
+    const wgt = new Float64Array(vertexCount);
+    for (let t = 0; t < originalTriangles; t += 1) {
+      const a = tri[t * 3]; const b = tri[t * 3 + 1]; const c = tri[t * 3 + 2];
+      const nx = faceNormals[t * 3]; const ny = faceNormals[t * 3 + 1]; const nz = faceNormals[t * 3 + 2];
+      const area = Math.hypot(nx, ny, nz) / 2;
+      if (!(area > 0)) continue;
+      acc[a * 3] += nx; acc[a * 3 + 1] += ny; acc[a * 3 + 2] += nz;
+      acc[b * 3] += nx; acc[b * 3 + 1] += ny; acc[b * 3 + 2] += nz;
+      acc[c * 3] += nx; acc[c * 3 + 1] += ny; acc[c * 3 + 2] += nz;
+      wgt[a] += area; wgt[b] += area; wgt[c] += area;
+    }
+    for (let v = 0; v < vertexCount; v += 1) {
+      const l = Math.hypot(acc[v * 3], acc[v * 3 + 1], acc[v * 3 + 2]);
+      if (l > 1e-24) {
+        origNormals[v * 3] = acc[v * 3] / l;
+        origNormals[v * 3 + 1] = acc[v * 3 + 1] / l;
+        origNormals[v * 3 + 2] = acc[v * 3 + 2] / l;
+      }
+    }
+  }
+  const driftCapNormalBase =
+    (options.quality === 'ultra' ? 0.004 : options.quality === 'high' ? 0.008 : options.quality === 'medium' ? 0.015 : 0.03) * diagonal;
+
   const heap = new MinHeap();
   const localEdgeLength = (vertex: number): number => {
     const incident = vertFaces[vertex];
@@ -422,6 +459,41 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     heap.push({ a, b, va: vertVersion[a], vb: vertVersion[b], x: ox, y: oy, z: oz, cost: combinedCost(a, b, ox, oy, oz) });
   };
 
+  for (let v = 0; v < vertexCount; v += 1) initLocalEdge[v] = localEdgeLength(v);
+
+  /** Deriva acumulada: rejeita se `candidate` afastar o vértice do original. */
+  const driftAllowed = (vertex: number, cx: number, cy: number, cz: number, regionFactor: number): boolean => {
+    const ox = mesh.positions[vertex * 3];
+    const oy = mesh.positions[vertex * 3 + 1];
+    const oz = mesh.positions[vertex * 3 + 2];
+    const dx = cx - ox; const dy = cy - oy; const dz = cz - oz;
+    const region = complexity.region[vertex] ?? RegionClass.Plana;
+    if (region === RegionClass.FeatureCritica || region === RegionClass.MicroDetalhe || complexity.locked[vertex] === 1) {
+      // Em arestas vivas a normal média é diagonal à superfície real: um
+      // deslizamento exato sobre a aresta teria "componente normal" enorme.
+      // Aqui vale o limite isotrópico pela aresta inicial; a geometria é
+      // guardada pelo flip/aspecto/link/quality-floor.
+      return Math.hypot(dx, dy, dz) <= Math.max(initLocalEdge[vertex], complexity.avgEdgeLength, 1e-12) * 1.5 + driftCapNormalBase;
+    }
+    const nx = origNormals[vertex * 3];
+    const ny = origNormals[vertex * 3 + 1];
+    const nz = origNormals[vertex * 3 + 2];
+    const nl = Math.hypot(nx, ny, nz);
+    if (!(nl > 0.5)) {
+      // Sem normal confiável: limita pela aresta inicial.
+      return Math.hypot(dx, dy, dz) <= Math.max(initLocalEdge[vertex], 1e-12) * 1.5;
+    }
+    const dn = Math.abs(dx * nx + dy * ny + dz * nz) / nl;
+    const tx = dx - ((dx * nx + dy * ny + dz * nz) / (nl * nl)) * nx;
+    const ty = dy - ((dx * nx + dy * ny + dz * nz) / (nl * nl)) * ny;
+    const tz = dz - ((dx * nx + dy * ny + dz * nz) / (nl * nl)) * nz;
+    const dt = Math.hypot(tx, ty, tz);
+    return (
+      dn <= driftCapNormalBase * regionFactor &&
+      dt <= Math.max(initLocalEdge[vertex], 1e-12) * 2.5 + driftCapNormalBase
+    );
+  };
+
   for (const key of edgeCounts.keys()) {
     const sep = key.indexOf(':');
     pushEdge(Number(key.slice(0, sep)), Number(key.slice(sep + 1)));
@@ -442,19 +514,24 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
   /** Tenta colapsar a aresta (a,b) na posição proposta. Retorna true se COMMIT. */
   const tryCollapse = (entry: HeapEntry): boolean => {
     const { a, b } = entry;
-    if (!vertAlive[a] || !vertAlive[b]) return false;
+    const dbg = (globalThis as Record<string, unknown>).__MESH_DEBUG as Record<string, number> | undefined;
+    const reject = (why: string): false => {
+      if (dbg) dbg[why] = (dbg[why] ?? 0) + 1;
+      return false;
+    };
+    if (!vertAlive[a] || !vertAlive[b]) return reject('dead');
     const key = edgeKeyOf(a, b);
-    if (!edgeCounts.has(key)) return false;
+    if (!edgeCounts.has(key)) return reject('noedge');
     // Entrada obsoleta: vértice mudou desde o push → recalcula e reenfileira.
     if (vertVersion[a] !== entry.va || vertVersion[b] !== entry.vb) {
       pushEdge(a, b);
-      return false;
+      return reject('stale');
     }
-    if ((options.preserveBorders || mustRemainWatertight) && edgeCounts.get(key) === 1) return false;
+    if ((options.preserveBorders || mustRemainWatertight) && edgeCounts.get(key) === 1) return reject('border');
 
     const aBoundary = vertOnBoundary[a] === 1;
     const bBoundary = vertOnBoundary[b] === 1;
-    if (!boundaryCollapseAllowed(aBoundary, bBoundary, edgeCounts.get(key) === 1)) return false;
+    if (!boundaryCollapseAllowed(aBoundary, bBoundary, edgeCounts.get(key) === 1)) return reject('boundary-mix');
 
     const facesA = vertFaces[a].filter((f) => triAlive[f]);
     const facesB = vertFaces[b].filter((f) => triAlive[f]);
@@ -473,19 +550,36 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
         for (const v of [i0, i1, i2]) if (v !== a && v !== b && vertAlive[v]) shared.add(v);
       }
     }
-    if (!linkCondition(neighA, neighB, shared, a, b)) return false;
+    if (!linkCondition(neighA, neighB, shared, a, b)) return reject('link');
 
     // FEATURE LOCK: aresta crítica só colapsa com erro quadrico minúsculo.
-    const regionA = complexity.region[a] ?? RegionClass.Plana;
-    const regionB = complexity.region[b] ?? RegionClass.Plana;
-    const worstRegion = Math.max(regionA, regionB);
+    // A severidade é herdada de TODA a vizinhança afetada (§6: "proximidade
+    // de outras features") — uma aresta plana colada a um canto vivo usa o
+    // limite do canto, não o da planície.
+    let worstRegion = Math.max(
+      complexity.region[a] ?? RegionClass.Plana,
+      complexity.region[b] ?? RegionClass.Plana,
+    );
+    for (const f of affected) {
+      const i0 = tri[f * 3]; const i1 = tri[f * 3 + 1]; const i2 = tri[f * 3 + 2];
+      const r0 = complexity.region[i0] ?? RegionClass.Plana;
+      const r1 = complexity.region[i1] ?? RegionClass.Plana;
+      const r2 = complexity.region[i2] ?? RegionClass.Plana;
+      if (r0 > worstRegion) worstRegion = r0;
+      if (r1 > worstRegion) worstRegion = r1;
+      if (r2 > worstRegion) worstRegion = r2;
+      if (worstRegion === RegionClass.FeatureCritica) break;
+    }
     const lockedEdge = (complexity.locked[a] === 1 && complexity.locked[b] === 1);
     const lockGate = options.quality === 'ultra' ? 1e-4 : options.quality === 'high' ? 4e-4 : options.quality === 'medium' ? 1.5e-3 : 5e-3;
-    if (lockedEdge && entry.cost > lockGate) return false;
+    if (lockedEdge && entry.cost > lockGate) return reject('lockgate');
 
     const strictDot = worstRegion === RegionClass.FeatureCritica ? 0.75 : worstRegion === RegionClass.MicroDetalhe ? 0.6 : worstRegion === RegionClass.AltaCurvatura ? 0.5 : 0.35;
     const maxAspect = worstRegion === RegionClass.FeatureCritica ? 4 : worstRegion === RegionClass.MicroDetalhe ? 6 : options.quality === 'low' ? 10 : 8;
-    const strictness = worstRegion === RegionClass.FeatureCritica ? 0.35 : worstRegion === RegionClass.MicroDetalhe ? 0.6 : worstRegion === RegionClass.AltaCurvatura ? 0.9 : 1.4;
+    // O ponto médio está a 0.5*aresta de cada extremo: o limite precisa ser
+    // >= 0.5 para nunca vetar o colapso mais seguro. A adaptatividade vem do
+    // flip/aspecto/custo; o deslocamento só veta saltos (deformação).
+    const strictness = worstRegion === RegionClass.FeatureCritica ? 0.8 : worstRegion === RegionClass.MicroDetalhe ? 1.0 : worstRegion === RegionClass.AltaCurvatura ? 1.2 : 1.4;
     const localEdge = Math.min(localEdgeLength(a), localEdgeLength(b));
 
     const readTriangle = (f: number): [number, number, number] => [tri[f * 3], tri[f * 3 + 1], tri[f * 3 + 2]];
@@ -498,8 +592,20 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       (qa[0] + qb[0]) * p[0] * p[0] + 2 * (qa[1] + qb[1]) * p[0] * p[1] + 2 * (qa[2] + qb[2]) * p[0] * p[2] + 2 * (qa[3] + qb[3]) * p[0] +
       (qa[4] + qb[4]) * p[1] * p[1] + 2 * (qa[5] + qb[5]) * p[1] * p[2] + 2 * (qa[6] + qb[6]) * p[1] +
       (qa[7] + qb[7]) * p[2] * p[2] + 2 * (qa[8] + qb[8]) * p[2] + (qa[9] + qb[9]);
+    // O ótimo QEM em regiões planas é degenerado no plano: o solver pode
+    // devolver um ponto distante com QEM ≈ 0 (deriva). Descarta o ótimo se
+    // ele saltar além do limite da região; o ponto médio é exato no plano.
+    // Em features críticas o ótimo quase nunca é usado (só microajustes).
+    const optimalGate = worstRegion === RegionClass.FeatureCritica ? 0.25 : worstRegion === RegionClass.MicroDetalhe ? 0.4 : worstRegion === RegionClass.AltaCurvatura ? 0.5 : 0.75;
+    const optimal: [number, number, number] = [entry.x, entry.y, entry.z];
+    const optimalSane =
+      Number.isFinite(optimal[0]) && Number.isFinite(optimal[1]) && Number.isFinite(optimal[2]) &&
+      displacementAllowed(
+        pos[a * 3], pos[a * 3 + 1], pos[a * 3 + 2], pos[b * 3], pos[b * 3 + 1], pos[b * 3 + 2],
+        optimal[0], optimal[1], optimal[2], localEdge, optimalGate,
+      );
     const candidates: Array<[number, number, number]> = [
-      [entry.x, entry.y, entry.z] as [number, number, number],
+      ...(optimalSane ? [optimal] : []),
       mid,
       [pos[a * 3], pos[a * 3 + 1], pos[a * 3 + 2]] as [number, number, number],
       [pos[b * 3], pos[b * 3 + 1], pos[b * 3 + 2]] as [number, number, number],
@@ -508,7 +614,24 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     let chosen: [number, number, number] | undefined;
     for (const p of candidates) {
       if (!Number.isFinite(p[0]) || !Number.isFinite(p[1]) || !Number.isFinite(p[2])) continue;
-      if (!displacementAllowed(pos[a * 3], pos[a * 3 + 1], pos[a * 3 + 2], pos[b * 3], pos[b * 3 + 1], pos[b * 3 + 2], p[0], p[1], p[2], localEdge, strictness)) continue;
+      if (!displacementAllowed(pos[a * 3], pos[a * 3 + 1], pos[a * 3 + 2], pos[b * 3], pos[b * 3 + 1], pos[b * 3 + 2], p[0], p[1], p[2], localEdge, strictness)) {
+        if (dbg) dbg['cand-displacement'] = (dbg['cand-displacement'] ?? 0) + 1;
+        continue;
+      }
+      if (dbg && (dbg['dumped'] ?? 0) < 6 && p === mid) {
+        dbg['dumped'] = (dbg['dumped'] ?? 0) + 1;
+        const probe: TriangleValidationStats = {
+          checked: 0, skipped: 0, minDot: 2, maxAspect: 0,
+          minAreaRatio: Infinity, maxAreaRatio: 0, failStage: 'pass',
+        };
+        validateResultTriangles(pos, getVertex, { a, b, position: p }, affected, readTriangle, faceNormalOf, {
+          minDot: strictDot, minAreaRatio: 0.08, maxAreaRatio: 12, maxAspect, minArea,
+        }, probe);
+        (dbg as Record<string, unknown>)[`dump-${dbg['dumped']}`] =
+          `edge(${a},${b}) wr=${worstRegion} aff=${affected.length} chk=${probe.checked} skp=${probe.skipped} ` +
+          `fail=${probe.failStage} minDot=${probe.minDot.toFixed(3)} maxAsp=${probe.maxAspect.toFixed(2)} ` +
+          `areaRatio=[${probe.minAreaRatio.toFixed(2)},${probe.maxAreaRatio.toFixed(2)}]`;
+      }
       if (!validateResultTriangles(pos, getVertex, { a, b, position: p }, affected, readTriangle, faceNormalOf, {
         minDot: strictDot,
         minAreaRatio: 0.08,
@@ -519,7 +642,33 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       chosen = p;
       break;
     }
-    if (!chosen) return false;
+    if (!chosen) return reject('no-placement');
+
+    // Deriva acumulada desde o ORIGINAL (erro local tem prioridade sobre o
+    // médio): o vértice sobrevivente e o arrastado precisam estar dentro do
+    // teto normal/tangencial. Colapsos exatos sobre a superfície passam;
+    // amassos fora da superfície são vetados antes do COMMIT.
+    const regionFactor = worstRegion === RegionClass.FeatureCritica ? 0.5 : worstRegion === RegionClass.MicroDetalhe ? 0.75 : 1;
+    // Teto por operação: a nova posição não pode sair do plano de NENHUMA
+    // face afetada sobrevivente além de planeCap. Deslizamentos sobre a
+    // superfície (distância ≈ 0) passam; amassos são vetados na hora, sem
+    // depender de validação global posterior.
+    const planeCap = driftCapNormalBase * regionFactor;
+    for (const f of affected) {
+      let i0 = tri[f * 3]; let i1 = tri[f * 3 + 1]; let i2 = tri[f * 3 + 2];
+      if (i0 === b) i0 = a;
+      if (i1 === b) i1 = a;
+      if (i2 === b) i2 = a;
+      if (i0 === i1 || i1 === i2 || i0 === i2) continue; // face morre no colapso
+      const nx = faceNormals[f * 3]; const ny = faceNormals[f * 3 + 1]; const nz = faceNormals[f * 3 + 2];
+      const nl = Math.hypot(nx, ny, nz);
+      if (!(nl > 1e-24)) return reject('plane-degenerate');
+      const px = pos[i0 * 3]; const py = pos[i0 * 3 + 1]; const pz = pos[i0 * 3 + 2];
+      const dist = Math.abs(nx * (chosen[0] - px) + ny * (chosen[1] - py) + nz * (chosen[2] - pz)) / nl;
+      if (!(dist <= planeCap)) return reject('plane-cap');
+    }
+    if (!driftAllowed(a, chosen[0], chosen[1], chosen[2], regionFactor)) return reject('drift-a');
+    if (!driftAllowed(b, chosen[0], chosen[1], chosen[2], regionFactor)) return reject('drift-b');
 
     // ---------------- COMMIT (atualização incremental EXATA) ----------------
     // Remove as arestas das faces afetadas ANTES de remapear.
@@ -573,6 +722,10 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     }
     vertVersion[a] += 1;
     activeTriangles -= removedFaces;
+    if (dbg) {
+      dbg['commit'] = (dbg['commit'] ?? 0) + 1;
+      dbg['removed'] = (dbg['removed'] ?? 0) + removedFaces;
+    }
     return removedFaces > 0;
   };
 
@@ -619,16 +772,24 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
   };
 
   // Snapshot do melhor estado válido (inicia com o original).
-  let bestValid = { positions: mesh.positions.slice(), indices: mesh.indices.slice(), triangles: originalTriangles };
+  let bestValid: { positions: Float32Array; indices: Uint32Array; triangles: number } = {
+    positions: mesh.positions.slice() as Float32Array,
+    indices: mesh.indices.slice() as Uint32Array,
+    triangles: originalTriangles,
+  };
   let bestStageReached = -1;
   const warnings: string[] = [];
   let stoppedSafely = false;
   let iterations = 0;
-  const maxIterations = Math.max(10_000, originalTriangles * 4);
+  let commits = 0;
+  // Orçamento em COMMITS (trabalho real), não em pops da fila: entradas
+  // obsoletas/mortas da heap preguiçosa não podem consumir o orçamento.
+  // O teto de parede (time budget, 60s) continua como trava principal.
+  const maxCommits = Math.max(10_000, originalTriangles * 2);
 
   const referenceSample: { positions: Float32Array; indices: Uint32Array } = {
-    positions: mesh.positions.slice(),
-    indices: mesh.indices.slice(),
+    positions: mesh.positions.slice() as Float32Array,
+    indices: mesh.indices.slice() as Uint32Array,
   };
 
   const validateStage = (candidate: { positions: Float32Array; indices: Uint32Array }): { ok: boolean; reasons: string[]; mean: number; max: number } => {
@@ -663,19 +824,27 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
 
   for (let stage = 0; stage < totalStages; stage += 1) {
     const stageTarget = targets[stage];
+    const stageStartActive = activeTriangles;
+    let stageCommits = 0;
     let stagePops = 0;
-    const stagePopsCap = Math.max(1000, (activeTriangles - stageTarget + 1) * 6);
-    while (activeTriangles > stageTarget && iterations < maxIterations) {
+    // Teto do estágio em COMMITS (+ folga para tentativas): pops obsoletos
+    // da heap preguiçosa não consomem o orçamento do estágio.
+    const stageCommitCap = Math.max(1000, (stageStartActive - stageTarget + 1) * 3);
+    const stagePopsCap = Math.max(10_000, (stageStartActive - stageTarget + 1) * 40);
+    while (activeTriangles > stageTarget && commits < maxCommits) {
       if (timedOut() || options.onCheckpoint?.(activeTriangles) === false) {
         stoppedSafely = true;
         break;
       }
       iterations += 1;
       stagePops += 1;
-      if (stagePops > stagePopsCap) break; // evita loop infinito em malha travada
+      if (stageCommits > stageCommitCap || stagePops > stagePopsCap) break; // evita loop infinito em malha travada
       const candidate = heap.pop();
       if (!candidate) break;
-      tryCollapse(candidate);
+      if (tryCollapse(candidate)) {
+        commits += 1;
+        stageCommits += 1;
+      }
       if (iterations % 4000 === 0) {
         const overall = 1 - (activeTriangles - target) / Math.max(1, originalTriangles - target);
         onProgress?.(Math.min(0.97, Math.max(0.03, 0.05 + overall * 0.85)));
@@ -684,6 +853,12 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     if (stoppedSafely || timedOut()) break;
 
     // Valida o estágio; em falha, ROLLBACK para o melhor estado válido.
+    const dbgStage = (globalThis as Record<string, unknown>).__MESH_DEBUG as Record<string, number> | undefined;
+    if (dbgStage) {
+      dbgStage[`stage-${stage}-active`] = activeTriangles;
+      dbgStage[`stage-${stage}-heap`] = heap.size;
+      dbgStage[`stage-${stage}-iters`] = iterations;
+    }
     const compact = buildCompact();
     const check = validateStage(compact);
     if (check.ok) {

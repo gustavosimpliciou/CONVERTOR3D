@@ -95,6 +95,16 @@ export interface FlipCheckOptions {
   minArea: number;
 }
 
+export interface TriangleValidationStats {
+  checked: number;
+  skipped: number;
+  minDot: number;
+  maxAspect: number;
+  minAreaRatio: number;
+  maxAreaRatio: number;
+  failStage: string;
+}
+
 export function validateResultTriangles(
   pos: Float64Array | number[],
   getVertex: (index: number) => [number, number, number],
@@ -103,9 +113,19 @@ export function validateResultTriangles(
   readTriangle: (face: number) => [number, number, number],
   faceNormalOf: (face: number) => [number, number, number],
   options: FlipCheckOptions,
+  stats?: TriangleValidationStats,
 ): boolean {
   const [nx, ny, nz] = proposal.position;
   void pos;
+  if (stats) {
+    stats.checked = 0; stats.skipped = 0; stats.minDot = 2;
+    stats.maxAspect = 0; stats.minAreaRatio = Infinity; stats.maxAreaRatio = 0;
+    stats.failStage = 'pass';
+  }
+  const fail = (stage: string): false => {
+    if (stats) stats.failStage = stage;
+    return false;
+  };
   for (const f of affectedFaces) {
     const [i0, i1, i2] = readTriangle(f);
     const mapped: number[] = [
@@ -113,10 +133,15 @@ export function validateResultTriangles(
       i1 === proposal.b ? proposal.a : i1,
       i2 === proposal.b ? proposal.a : i2,
     ];
-    if (new Set(mapped).size < 3) continue; // faces que morrem no colapso
+    if (new Set(mapped).size < 3) {
+      if (stats) stats.skipped += 1;
+      continue; // faces que morrem no colapso
+    }
+    if (stats) stats.checked += 1;
     const p0 = mapped[0] === proposal.a ? [nx, ny, nz] as [number, number, number] : getVertex(mapped[0]);
     const p1 = mapped[1] === proposal.a ? [nx, ny, nz] as [number, number, number] : getVertex(mapped[1]);
     const p2 = mapped[2] === proposal.a ? [nx, ny, nz] as [number, number, number] : getVertex(mapped[2]);
+    const dbg = (globalThis as Record<string, unknown>).__MESH_DEBUG as Record<string, number> | undefined;
     const before = faceNormalOf(f);
     const bl = Math.hypot(before[0], before[1], before[2]);
     const abx = p1[0] - p0[0]; const aby = p1[1] - p0[1]; const abz = p1[2] - p0[2];
@@ -125,16 +150,45 @@ export function validateResultTriangles(
     const ay = abz * acx - abx * acz;
     const az = abx * acy - aby * acx;
     const al = Math.hypot(ax, ay, az);
-    if (!(al > 1e-18) || !(bl > 1e-18)) return false;
+    if (!(al > 1e-18) || !(bl > 1e-18)) {
+      if (dbg) dbg['tri-zero-area'] = (dbg['tri-zero-area'] ?? 0) + 1;
+      return fail('zero-area');
+    }
     const dot = (before[0] * ax + before[1] * ay + before[2] * az) / (bl * al);
-    if (!(dot >= options.minDot)) return false;
+    if (stats && dot < stats.minDot) stats.minDot = dot;
+    if (!(dot >= options.minDot)) {
+      if (dbg) {
+        dbg['tri-flip'] = (dbg['tri-flip'] ?? 0) + 1;
+        const worst = Number((dbg as Record<string, unknown>)['worst-dot'] ?? 2);
+        if (dot < worst) (dbg as Record<string, unknown>)['worst-dot'] = Math.round(dot * 1000) / 1000;
+      }
+      return fail('flip');
+    }
     const beforeArea = bl / 2;
     const afterArea = al / 2;
-    if (!(afterArea >= options.minArea)) return false;
+    if (!(afterArea >= options.minArea)) {
+      if (dbg) dbg['tri-minarea'] = (dbg['tri-minarea'] ?? 0) + 1;
+      return fail('minarea');
+    }
     const ratio = afterArea / beforeArea;
-    if (!(ratio >= options.minAreaRatio && ratio <= options.maxAreaRatio)) return false;
+    if (stats) {
+      if (ratio < stats.minAreaRatio) stats.minAreaRatio = ratio;
+      if (ratio > stats.maxAreaRatio) stats.maxAreaRatio = ratio;
+    }
+    if (!(ratio >= options.minAreaRatio && ratio <= options.maxAreaRatio)) {
+      if (dbg) dbg['tri-arearatio'] = (dbg['tri-arearatio'] ?? 0) + 1;
+      return fail('arearatio');
+    }
     const aspect = triangleAspect(p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], p2[0], p2[1], p2[2]);
-    if (!(aspect <= options.maxAspect)) return false;
+    if (stats && aspect > stats.maxAspect) stats.maxAspect = aspect;
+    if (!(aspect <= options.maxAspect)) {
+      if (dbg) {
+        dbg['tri-aspect'] = (dbg['tri-aspect'] ?? 0) + 1;
+        const worst = Number((dbg as Record<string, unknown>)['worst-aspect'] ?? 0);
+        if (aspect > worst && aspect < 1e15) (dbg as Record<string, unknown>)['worst-aspect'] = Math.round(aspect * 100) / 100;
+      }
+      return fail('aspect');
+    }
   }
   return true;
 }
@@ -257,9 +311,12 @@ export function approximateSurfaceError(
     const tx1 = Math.max(cp[a], cp[b], cp[c]);
     const ty1 = Math.max(cp[a + 1], cp[b + 1], cp[c + 1]);
     const tz1 = Math.max(cp[a + 2], cp[b + 2], cp[c + 2]);
-    const x0 = Math.max(0, Math.floor((tx0 - minX) / cellSize));
-    const y0 = Math.max(0, Math.floor((ty0 - minY) / cellSize));
-    const z0 = Math.max(0, Math.floor((tz0 - minZ) / cellSize));
+    // NOTA: os índices inferiores também precisam do clamp superior — um
+    // triângulo exatamente sobre o máximo da bounding box gerava
+    // x0 > x1 (loop vazio) e sumia da grade, criando erro fantasma.
+    const x0 = Math.min(cellsPerAxis - 1, Math.max(0, Math.floor((tx0 - minX) / cellSize)));
+    const y0 = Math.min(cellsPerAxis - 1, Math.max(0, Math.floor((ty0 - minY) / cellSize)));
+    const z0 = Math.min(cellsPerAxis - 1, Math.max(0, Math.floor((tz0 - minZ) / cellSize)));
     const x1 = Math.min(cellsPerAxis - 1, Math.floor((tx1 - minX) / cellSize));
     const y1 = Math.min(cellsPerAxis - 1, Math.floor((ty1 - minY) / cellSize));
     const z1 = Math.min(cellsPerAxis - 1, Math.floor((tz1 - minZ) / cellSize));

@@ -246,7 +246,7 @@ function Home() {
     processorRef.current?.cancel();
     const processor = createMeshProcessor();
     processorRef.current = processor;
-    setPhase('processing'); setProgress(2); setElapsedMs(0); setMessage(isImport ? 'lendo estrutura do arquivo' : 'analisando topologia'); setError(''); setNotice('');
+    setPhase('processing'); setProgress(2); setElapsedMs(0); setMessage(isImport ? 'lendo estrutura do arquivo' : 'analisando topologia'); setError(''); setNotice(''); setStage('ANALISANDO'); setLiveTriangles(0); setLiveOriginal(0);
     processor.process(await file.arrayBuffer(), file.name, { targetTriangles, quality: settings.quality, preserveBorders: settings.borders, preserveSilhouette: settings.silhouette, protectDetails: settings.details }, (event) => {
       if (event.type === 'progress') {
         setProgress(Math.round(event.data.progress * 100));

@@ -173,7 +173,9 @@ function densityInRegion(mesh: MeshData, center: [number, number, number], radiu
   check('cubo/reducao-moderada: sem non-manifold', out.nonManifoldEdges === 0, `nm=${out.nonManifoldEdges}`);
 }
 
-// --- 2. Cubo: redução agressiva (10%) com target flexível ---
+// --- 2. Cubo: redução agressiva (10%) com target flexível (§31) ---
+// A integridade tem prioridade: se 10% deformaria, o engine PARA no melhor
+// estado seguro (mais faces que o alvo) em vez de destruir a peça.
 {
   const mesh = subdividedCube(12);
   const original = mesh.indices.length / 3;
@@ -182,9 +184,10 @@ function densityInRegion(mesh: MeshData, center: [number, number, number], radiu
     preserveBorders: true, preserveSilhouette: true, protectDetails: true, timeBudgetMs: 20_000,
   });
   const ref = auditMesh(mesh);
-  const out = auditMesh({ positions: result.positions, indices: result.indices, format: 'STL', bounds: calculateBounds(result.positions) });
+  const out = auditMesh({ positions: result.positions, indices: result.indices, format: 'STL', bounds: calculateBounds(result.positions) }, ref);
   check('cubo/reducao-agressiva: zero novos buracos', out.boundaryLoops <= ref.boundaryLoops, `loops=${out.boundaryLoops}`);
-  check('cubo/reducao-agressiva: integridade acima do target', out.valid, `faces=${result.triangles} (alvo=${Math.floor(original * 0.1)})`);
+  check('cubo/reducao-agressiva: reduziu sem criar defeitos', result.triangles < original && out.valid, `faces=${result.triangles} (alvo=${Math.floor(original * 0.1)})`);
+  check('cubo/reducao-agressiva: sem non-manifold novo', out.nonManifoldEdges <= ref.nonManifoldEdges, `nm=${out.nonManifoldEdges}`);
 }
 
 // --- 3. Esfera: curvatura uniforme, volume e bounds ---
@@ -216,7 +219,9 @@ function densityInRegion(mesh: MeshData, center: [number, number, number], radiu
   const detailRetention = detailAfter / Math.max(1, detailBefore);
   const globalRetention = result.triangles / original;
   check('organico: detalhe retido acima da média global', detailRetention >= globalRetention * 0.9, `detalhe=${(detailRetention * 100).toFixed(1)}% global=${(globalRetention * 100).toFixed(1)}%`);
-  check('organico: zero novos buracos', result.validation.boundaryLoops === 0, `loops=${result.validation.boundaryLoops}`);
+  // Os "dedos" são tubos abertos: 6 loops PRÉ-EXISTENTES. Vale FINAL <= ORIGINAL.
+  const refLoops = auditMesh(mesh).boundaryLoops;
+  check('organico: zero novos buracos', result.validation.boundaryLoops <= refLoops, `loops=${result.validation.boundaryLoops} (original=${refLoops})`);
   check('organico: sem non-manifold', result.validation.nonManifoldEdges === 0, `nm=${result.validation.nonManifoldEdges}`);
   const stats = buildStats(reducedMesh);
   check('organico: sem triângulos degenerados', stats.degenerateTriangles === 0, `deg=${stats.degenerateTriangles}`);
