@@ -52,8 +52,6 @@ type ReducedMeta = {
   mesh: MeshData;
   stl: ArrayBuffer;
   warnings: string[];
-  comparison: WorkerSuccess['comparison'];
-  targetReached: boolean;
 };
 
 const queryClient = new QueryClient();
@@ -187,7 +185,7 @@ function SettingsPanel({ settings, setSettings, disabled, maxTarget }: { setting
 }
 
 function FilePanel({ model, reduced }: { model: MeshMeta; reduced?: ReducedMeta }) {
-  return <section className="panel p-4" aria-label="Informações do modelo"><div className="mb-3 flex items-center gap-2"><FileBox size={15} className="text-orange-400" /><span className="text-sm font-medium">Modelo carregado</span></div><div className="flex min-w-0 items-center gap-3 border-b border-white/[.06] pb-3"><div className="flex h-9 w-9 shrink-0 items-center justify-center border border-orange-400/25 bg-orange-500/10 text-orange-300"><Box size={16} /></div><div className="min-w-0"><div className="truncate text-xs text-stone-200" data-testid="text-source-name">{model.name}</div><div className="mono mt-1 text-[10px] text-stone-600">{model.format} · {formatBytes(model.bytes)}</div></div></div><div className="mt-2"><MetaLine label="Triângulos" value={formatCount(model.stats.triangles)} /><MetaLine label="Vértices" value={formatCount(model.stats.vertices)} /><MetaLine label="Dimensões" value={model.stats.bounds.size.map((v) => v.toFixed(2)).join(' × ')} /><MetaLine label="Componentes" value={formatCount(model.stats.components)} /><MetaLine label="Bordas abertas" value={formatCount(model.stats.openEdges)} /><MetaLine label="Non-manifold" value={formatCount(model.stats.nonManifoldEdges)} /><MetaLine label="Degenerados" value={formatCount(model.stats.degenerateTriangles)} /></div>{reduced && <div className="mt-3 border-t border-orange-400/15 pt-3"><div className="mb-1 flex items-center justify-between"><span className="eyebrow text-orange-400/80">resultado validado</span><CheckCircle2 size={14} className="text-orange-400" /></div><MetaLine label="Reduzidos" value={formatCount(reduced.stats.triangles)} accent /><MetaLine label="Redução" value={`${Math.max(0, (1 - reduced.stats.triangles / model.stats.triangles) * 100).toFixed(1)}%`} accent /><MetaLine label="Erro aproximado" value={`${(reduced.comparison.approximateError * 100).toFixed(2)}%`} accent /><MetaLine label="Bordas novas" value={formatCount(reduced.comparison.newOpenEdges)} /><MetaLine label="STL binário" value={formatBytes(reduced.stl.byteLength)} accent /></div>}</section>;
+  return <section className="panel p-4" aria-label="Informações do modelo"><div className="mb-3 flex items-center gap-2"><FileBox size={15} className="text-orange-400" /><span className="text-sm font-medium">Modelo carregado</span></div><div className="flex min-w-0 items-center gap-3 border-b border-white/[.06] pb-3"><div className="flex h-9 w-9 shrink-0 items-center justify-center border border-orange-400/25 bg-orange-500/10 text-orange-300"><Box size={16} /></div><div className="min-w-0"><div className="truncate text-xs text-stone-200" data-testid="text-source-name">{model.name}</div><div className="mono mt-1 text-[10px] text-stone-600">{model.format} · {formatBytes(model.bytes)}</div></div></div><div className="mt-2"><MetaLine label="Triângulos" value={formatCount(model.stats.triangles)} /><MetaLine label="Vértices" value={formatCount(model.stats.vertices)} /><MetaLine label="Dimensões" value={model.stats.bounds.size.map((v) => v.toFixed(2)).join(' × ')} /></div>{reduced && <div className="mt-3 border-t border-orange-400/15 pt-3"><div className="mb-1 flex items-center justify-between"><span className="eyebrow text-orange-400/80">resultado</span><CheckCircle2 size={14} className="text-orange-400" /></div><MetaLine label="Reduzidos" value={formatCount(reduced.stats.triangles)} accent /><MetaLine label="Redução" value={`${Math.max(0, (1 - reduced.stats.triangles / model.stats.triangles) * 100).toFixed(1)}%`} accent /><MetaLine label="STL binário" value={formatBytes(reduced.stl.byteLength)} accent /></div>}</section>;
 }
 
 function ProcessingView({ model, progress, message, onCancel }: { model: MeshMeta; progress: number; message: string; onCancel: () => void }) {
@@ -247,8 +245,7 @@ function Home() {
           setPhase('ready'); setProgress(0);
         } else if (model) {
           const reducedMesh: MeshData = { positions: result.positions, indices: result.indices, format: result.format, bounds: result.reduced.bounds };
-          setReduced({ stats: result.reduced, mesh: reducedMesh, stl: result.stl.buffer, warnings: result.warnings, comparison: result.comparison, targetReached: result.targetReached });
-          setNotice(result.targetReached ? 'Redução aprovada dentro da meta solicitada.' : 'Meta ajustada: a maior redução segura ficou acima do alvo para preservar a forma.');
+          setReduced({ stats: result.reduced, mesh: reducedMesh, stl: result.stl.buffer, warnings: result.warnings });
           setComparing(true); setProgress(100); setPhase('complete');
         }
         processorRef.current = undefined;

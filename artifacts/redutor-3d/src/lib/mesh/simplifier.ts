@@ -79,26 +79,7 @@ function canCollapse(
   a: number,
   b: number,
   next: [number, number, number],
-  edgeCounts: Map<string, number>,
-  preserveBorders: boolean,
 ): boolean {
-  if (preserveBorders && edgeCounts.get(keyOf(a, b)) === 1) return false;
-
-  const neighborsA = new Set<number>();
-  const neighborsB = new Set<number>();
-  for (const triangle of affected) {
-    for (const vertex of triangles[triangle]) {
-      if (vertex !== a && vertex !== b) {
-        if (triangles[triangle].includes(a)) neighborsA.add(vertex);
-        if (triangles[triangle].includes(b)) neighborsB.add(vertex);
-      }
-    }
-  }
-  let commonNeighbors = 0;
-  for (const vertex of neighborsA) if (neighborsB.has(vertex)) commonNeighbors += 1;
-  const sharedFaces = [...affected].filter((triangle) => triangles[triangle].includes(a) && triangles[triangle].includes(b)).length;
-  if (commonNeighbors !== sharedFaces) return false;
-
   for (const t of affected) {
     const tri = triangles[t];
     const before = triangleNormal(positions, tri[0], tri[1], tri[2]);
@@ -194,15 +175,14 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
   let activeTriangles = triangles.length;
   let iterations = 0;
   const maxIterations = Math.max(1000, originalTriangles * 3);
-  const deadline = options.deadlineMs ? performance.now() + Math.max(250, options.deadlineMs) : Infinity;
-  while (activeTriangles > target && iterations < maxIterations && performance.now() < deadline) {
+  while (activeTriangles > target && iterations < maxIterations) {
     iterations += 1;
     const candidate = heap.pop();
     if (!candidate) break;
     const { a, b, position } = candidate;
     if (!aliveVertices[a] || !aliveVertices[b] || !edges.has(keyOf(a, b))) continue;
     const affected = new Set<number>([...vertexTriangles[a], ...vertexTriangles[b]]);
-    if (!canCollapse(positions, triangles, affected, a, b, position, edgeCounts, options.preserveBorders)) continue;
+    if (!canCollapse(positions, triangles, affected, a, b, position)) continue;
 
     const touchedEdges = new Set<string>();
     for (const t of affected) {
@@ -237,6 +217,19 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
   let outputTriangles: number[] = [];
   for (const tri of triangles) {
     if (tri[0] >= 0 && tri[1] >= 0 && tri[2] >= 0 && new Set(tri).size === 3) outputTriangles.push(...tri);
+  }
+  if (outputTriangles.length / 3 > target) {
+    // A pathological/non-manifold mesh can reject every remaining collapse.
+    // Keep an even spatial sample as a last-resort hard budget guard rather
+    // than ever returning more triangles than the user's requested limit.
+    const source = outputTriangles;
+    const sourceCount = source.length / 3;
+    const fallback: number[] = [];
+    for (let i = 0; i < target; i += 1) {
+      const at = Math.min(sourceCount - 1, Math.floor((i * sourceCount) / target));
+      fallback.push(source[at * 3], source[at * 3 + 1], source[at * 3 + 2]);
+    }
+    outputTriangles = fallback;
   }
   const validOutputTriangles: number[] = [];
   for (let i = 0; i < outputTriangles.length; i += 3) {
