@@ -161,6 +161,50 @@ export interface DecompressPackRequest {
   fileName: string;
 }
 
+export interface OptimizeRequest {
+  type: 'optimize';
+  buffer: ArrayBuffer;
+  fileName: string;
+}
+
+export interface OptimizeBenchmarkEntry {
+  id: string;
+  label: string;
+  bytes: number;
+  ratio: number;
+  valid: boolean;
+  tier: 'A' | 'B';
+}
+
+export interface OptimizeSuccess {
+  type: 'complete';
+  job: 'optimize';
+  /** STL/OBJ final válido, mesma extensão do original. */
+  stl: ArrayBuffer;
+  fileName: string;
+  /** .gz secundário (arquivamento universal). */
+  gzip: ArrayBuffer;
+  gzipFileName: string;
+  method: string;
+  methodLabel: string;
+  tier: 'A' | 'B';
+  format: string;
+  originalBytes: number;
+  deliveredBytes: number;
+  ratio: number;
+  faces: number;
+  validation: 'LOSSLESS PASS' | 'GEOMETRY PASS' | 'LOSSLESS FAIL';
+  checks: Record<string, boolean>;
+  warnings: string[];
+  benchmark: OptimizeBenchmarkEntry[];
+  meanError: number;
+  maxError: number;
+  volumeDeltaPercent: number;
+  boundaryOriginal: number;
+  boundaryFinal: number;
+  elapsedMs: number;
+}
+
 export type CompressorJob = 'compress' | 'decompress';
 
 export interface CompressorProgress {

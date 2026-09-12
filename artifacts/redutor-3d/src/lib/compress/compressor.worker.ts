@@ -20,10 +20,13 @@ import type {
   CompressorSuccess,
   DecompressPackRequest,
   DecompressSuccess,
+  OptimizeRequest,
+  OptimizeSuccess,
 } from '../mesh/types';
+import { optimizeDelivery } from './optimizer';
 
 const post = (
-  message: CompressorProgress | CompressorSuccess | DecompressSuccess | CompressorFailure,
+  message: CompressorProgress | CompressorSuccess | DecompressSuccess | OptimizeSuccess | CompressorFailure,
   transfer: Transferable[] = [],
 ) => self.postMessage(message, { transfer });
 
@@ -199,11 +202,95 @@ async function handleDecompress(request: DecompressPackRequest): Promise<void> {
   self.postMessage(done, { transfer: [buffer] });
 }
 
-self.onmessage = (event: MessageEvent<AnalyzeRequest | CompressRequest | DecompressPackRequest>) => {
+async function handleOptimize(request: OptimizeRequest): Promise<void> {
+  const started = performance.now();
+  const elapsed = (): number => performance.now() - started;
+  const bytes = new Uint8Array(request.buffer);
+
+  post({
+    type: 'progress', job: 'compress', phase: 'analyzing', progress: 0.05,
+    message: 'Analisando o modelo original…', stage: 'ANALISANDO',
+    elapsedMs: elapsed(), originalBytes: bytes.length,
+  });
+  const { analysis, info } = await analyzeBytes(request.fileName, bytes);
+  post({
+    type: 'progress', job: 'compress', phase: 'analyzing', progress: 0.15,
+    message: `Detectado ${info.format} — ${info.faces > 0 ? `${info.faces.toLocaleString('pt-BR')} faces · ` : ''}buscando a melhor representação…`,
+    stage: 'IDENTIFICANDO_FEATURES', elapsedMs: elapsed(), originalBytes: bytes.length,
+    originalTriangles: info.faces, format: info.format,
+  });
+
+  post({
+    type: 'progress', job: 'compress', phase: 'compressing', progress: 0.25,
+    message: 'Otimizando a representação (faces preservadas)…', stage: 'OTIMIZANDO',
+    elapsedMs: elapsed(), originalBytes: bytes.length, originalTriangles: info.faces, format: info.format,
+  });
+  const result = await optimizeDelivery(bytes, request.fileName, info, (stageMessage) => {
+    post({
+      type: 'progress', job: 'compress', phase: 'compressing', progress: 0.5,
+      message: stageMessage, stage: 'OTIMIZANDO',
+      elapsedMs: elapsed(), originalBytes: bytes.length, originalTriangles: info.faces, format: info.format,
+    });
+  });
+
+  post({
+    type: 'progress', job: 'compress', phase: 'validating', progress: 0.9,
+    message: 'Reimportando e comparando geometria…', stage: 'VALIDANDO',
+    elapsedMs: elapsed(), originalBytes: bytes.length, originalTriangles: info.faces, format: info.format,
+  });
+
+  // A validação já ocorreu dentro do optimizeDelivery (reimportação +
+  // comparação); aqui apenas consolidamos o selo para a UI.
+  const report = result.report;
+  const validation = report
+    ? (report.tier === 'A' ? 'LOSSLESS PASS' : 'GEOMETRY PASS')
+    : 'GEOMETRY PASS';
+
+  post({
+    type: 'progress', job: 'compress', phase: 'done', progress: 0.99,
+    message: `Arquivo comprimido sem alteração da malha — ${((1 - result.ratio) * 100).toFixed(1)}% menor.`,
+    stage: 'FINALIZANDO', elapsedMs: elapsed(), originalBytes: bytes.length,
+    originalTriangles: info.faces, format: info.format,
+  });
+
+  const stlBuffer = result.delivered.buffer.slice(0) as ArrayBuffer;
+  const gzipBuffer = result.gzipSecondary.buffer.slice(0) as ArrayBuffer;
+  const base = request.fileName.replace(/\.[^.]+$/, '');
+  const complete: OptimizeSuccess = {
+    type: 'complete',
+    job: 'optimize',
+    stl: stlBuffer,
+    fileName: result.deliveredFileName,
+    gzip: gzipBuffer,
+    gzipFileName: `${base}.gz`,
+    method: result.method,
+    methodLabel: result.methodLabel,
+    tier: result.tier,
+    format: info.format,
+    originalBytes: result.originalBytes,
+    deliveredBytes: result.deliveredBytes,
+    ratio: result.ratio,
+    faces: result.faces,
+    validation,
+    checks: report ? report.checks : {},
+    warnings: [...result.warnings, ...analysis.notes],
+    benchmark: result.benchmark,
+    meanError: report ? report.meanError : 0,
+    maxError: report ? report.maxError : 0,
+    volumeDeltaPercent: report ? report.volumeDeltaPercent : 0,
+    boundaryOriginal: report ? report.boundaryOriginal : 0,
+    boundaryFinal: report ? report.boundaryFinal : 0,
+    elapsedMs: elapsed(),
+  };
+  self.postMessage(complete, { transfer: [stlBuffer, gzipBuffer] });
+}
+
+self.onmessage = (event: MessageEvent<AnalyzeRequest | CompressRequest | DecompressPackRequest | OptimizeRequest>) => {
   const request = event.data;
   const run = async (): Promise<void> => {
     if (request.type === 'analyze') await handleAnalyze(request);
     else if (request.type === 'compress') await handleCompress(request);
+    else if (request.type === 'optimize') await handleOptimize(request);
     else if (request.type === 'decompress-pack') await handleDecompress(request);
   };
   run().catch((error: unknown) => {

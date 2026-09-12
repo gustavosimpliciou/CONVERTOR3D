@@ -10,7 +10,8 @@ Uma ferramenta local com dois modos: **Compressor Lossless** (fluxo principal �
 - `PORT=20943 BASE_PATH=/ pnpm run build` — typecheck + build all packages locally; managed artifact builds provide these values automatically
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- `pnpm --filter @workspace/scripts run validate:compression` — testes do compressor (30 checks, inclui modelo de 300k faces)
+- `pnpm --filter @workspace/scripts run validate:compression` — testes do compressor interno (30 checks, inclui modelo de 300k faces)
+- `pnpm --filter @workspace/scripts run validate:stl-delivery` — testes da entrega STL/OBJ (27 checks, inclui modelo de 1M faces ≈ 50MB)
 - `pnpm --filter @workspace/scripts run validate:decimation` — testes de regressão do redutor (19 checks)
 - Required env: `DATABASE_URL` — Postgres connection string
 
@@ -41,7 +42,7 @@ Uma ferramenta local com dois modos: **Compressor Lossless** (fluxo principal �
 
 - Todo processamento pesado roda em Web Workers para manter a interface responsiva.
 - O arquivo original é reaberto a partir do objeto `File` quando necessário; buffers intermediários são transferidos aos Workers.
-- MODO 1 — Compressor Lossless (`src/lib/compress/`): pipeline IMPORTAÇÃO → ANÁLISE → COMPRESSÃO → VALIDAÇÃO → DOWNLOAD. Módulos: `sha256.ts` (SHA-256 puro, incremental), `formats.ts` (FormatDetector por conteúdo), `analyzer.ts` (entropia/redundância), `engine.ts` (CAMADA A shuffle reversível + CAMADA B DEFLATE/gzip por streaming, seleção smart com verificação da vencedora), `container.ts` (.3dpack v1 + .gz universal), `validation.ts` (14 pontos: bytes, SHA-256, faces, bbox, volume, reabertura independente). NÍVEL A = byte-lossless (SHA igual ou FAIL); NÍVEL B = geometry-lossless (sinalizado). Integridade > tamanho, sempre.
+- MODO 1 — Compressor (`src/lib/compress/`): pipeline IMPORTAÇÃO → ANÁLISE → OTIMIZAÇÃO → REIMPORTAÇÃO → COMPARAÇÃO → DOWNLOAD. A saída principal mantém a extensão original (`modelo.stl` → `modelo_comprimido.stl`, pronto para o slicer). Módulos: `sha256.ts` (SHA-256 puro, incremental), `formats.ts` (FormatDetector por conteúdo), `analyzer.ts` (entropia/redundância), `stl-io.ts` (leitura/escrita STL/OBJ sem tocar na geometria), `optimizer.ts` (RepresentationOptimizer + benchmark + fallback), `geometry-validator.ts` (reimportação e comparação: faces, bbox, volume, área, centroide, normais, topologia, Hausdorff), `engine.ts` (métodos internos/arquivo: shuffle + DEFLATE/gzip), `container.ts` (.3dpack v1 + .gz secundário), `validation.ts` (níveis A/B). NÍVEL A = byte-lossless; NÍVEL B = geometry-lossless (ex. ASCII→binário, declarado); integridade > tamanho, sempre. Decisão documentada: STL binário tem tamanho fixo 84+50N — com mesmo N, válido ⇒ mesmo tamanho; a redução real de .stl vem de ASCII→binário (60–85%).
 - MODO 2 — Engine `FEATURE-AWARE ADAPTIVE MESH DECIMATION` (`src/lib/mesh/`): a integridade geométrica tem prioridade absoluta sobre o número de faces (target é meta, não autorização para deformar).
 - `complexity.ts` — mapa de complexidade geométrica: curvatura, variação de normais, dihedral angle, densidade local, estrutura fina e silhueta classificam cada vértice (plana/curva/alta/micro/feature-crítica) com FEATURE LOCK nas regiões críticas.
 - `safeguards.ts` — cada edge collapse passa por SIMULATE → VALIDATE → COMMIT/REJECT: link condition, regra de borda (zero novos buracos), flip de normais adaptativo, aspect ratio, teto de deslocamento por plano e Hausdorff aproximado por grade espacial.

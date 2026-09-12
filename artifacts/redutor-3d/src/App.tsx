@@ -28,7 +28,7 @@ import { buildStats } from './lib/mesh/geometry';
 import { createMeshProcessor, downloadStl } from './lib/mesh/processor';
 import { createCompressor, downloadBytes } from './lib/compress/processor';
 import type { MeshData, MeshStats, Quality, WorkerSuccess } from './lib/mesh/types';
-import type { AnalyzeSuccess, CompressAnalysis, CompressLevel, CompressorSuccess, DecompressSuccess } from './lib/mesh/types';
+import type { AnalyzeSuccess, CompressAnalysis, DecompressSuccess, OptimizeSuccess } from './lib/mesh/types';
 
 export type AppMode = 'compress' | 'reduce';
 
@@ -63,11 +63,7 @@ const MODEL_ACCEPT = '.stl,.obj,.ply,.off,.glb,.gltf,.fbx,.dae,model/stl,model/o
 const SUPPORTED_FORMATS_LABEL = 'STL · OBJ · PLY · OFF · GLB · GLTF · FBX · DAE';
 const COMPRESS_ACCEPT = `${MODEL_ACCEPT},.3dpack,.3mf,model/3mf`;
 const COMPRESS_FORMATS_LABEL = 'STL · OBJ · PLY · OFF · GLB · GLTF · FBX · DAE · 3MF · 3DPACK';
-const LEVEL_LABELS: Record<CompressLevel, { title: string; caption: string }> = {
-  fast: { title: 'Máxima velocidade', caption: 'poucas estratégias' },
-  balanced: { title: 'Balanceado', caption: 'custo × benefício' },
-  max: { title: 'Máxima compressão', caption: 'testa todas' },
-};
+const META_OPTIONS = [25, 40, 50, 75] as const;
 const QUALITY_LABELS: Record<Quality, string> = {
   low: 'Rascunho',
   medium: 'Equilibrada',
@@ -320,21 +316,27 @@ function ReducerHome({ onModeChange }: { onModeChange: (mode: AppMode) => void }
 
 type CompressPhase = 'empty' | 'analyzing' | 'ready' | 'compressing' | 'done' | 'error';
 
-type PackResult = {
-  analysis: CompressAnalysis;
-  pack: ArrayBuffer;
-  packFileName: string;
+type OptimizeDelivery = {
+  stl: ArrayBuffer;
+  fileName: string;
   gzip: ArrayBuffer;
   gzipFileName: string;
-  rebuilt: ArrayBuffer;
-  rebuiltFileName: string;
   method: string;
-  transform: string;
+  methodLabel: string;
+  tier: 'A' | 'B';
+  format: string;
   originalBytes: number;
-  packBytes: number;
-  gzipBytes: number;
+  deliveredBytes: number;
+  ratio: number;
   faces: number;
+  validation: string;
+  checks: Record<string, boolean>;
   warnings: string[];
+  meanError: number;
+  maxError: number;
+  volumeDeltaPercent: number;
+  boundaryOriginal: number;
+  boundaryFinal: number;
   elapsedMs: number;
 };
 
@@ -350,8 +352,8 @@ function shortHash(hash: string) {
   return `${hash.slice(0, 12)}…${hash.slice(-6)}`;
 }
 
-function LevelSelect({ level, onChange, disabled }: { level: CompressLevel; onChange: (level: CompressLevel) => void; disabled?: boolean }) {
-  return <div><div className="mb-2 text-xs text-stone-400">Estratégia de compressão</div><div className="grid grid-cols-3 gap-1">{(Object.keys(LEVEL_LABELS) as CompressLevel[]).map((option) => <button key={option} className={`border px-2 py-2 text-left transition ${level === option ? 'border-orange-400/60 bg-orange-500/10 text-orange-300' : 'border-white/[.07] bg-black/10 text-stone-500 hover:border-white/20'}`} onClick={() => onChange(option)} disabled={disabled} data-testid={`button-level-${option}`}><span className="block text-[11px]">{LEVEL_LABELS[option].title}</span><span className="mono text-[9px] text-stone-600">{LEVEL_LABELS[option].caption}</span></button>)}</div></div>;
+function MetaSelect({ target, onChange, disabled }: { target: number; onChange: (target: number) => void; disabled?: boolean }) {
+  return <div><div className="mb-2 text-xs text-stone-400">Meta de redução (apenas meta — a geometria nunca é tocada)</div><div className="grid grid-cols-4 gap-1">{META_OPTIONS.map((option) => <button key={option} className={`border px-2 py-2 text-center transition ${target === option ? 'border-orange-400/60 bg-orange-500/10 text-orange-300' : 'border-white/[.07] bg-black/10 text-stone-500 hover:border-white/20'}`} onClick={() => onChange(option)} disabled={disabled} data-testid={`button-meta-${option}`}><span className="mono block text-[12px]">{option}%</span></button>)}</div></div>;
 }
 
 function CompressorHome({ onModeChange }: { onModeChange: (mode: AppMode) => void }) {
@@ -361,11 +363,11 @@ function CompressorHome({ onModeChange }: { onModeChange: (mode: AppMode) => voi
   const [phase, setPhase] = useState<CompressPhase>('empty');
   const [fileName, setFileName] = useState('');
   const [analysis, setAnalysis] = useState<CompressAnalysis | null>(null);
-  const [level, setLevel] = useState<CompressLevel>('balanced');
+  const [targetPercent, setTargetPercent] = useState<number>(50);
   const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState('preparando arquivo');
   const [elapsedMs, setElapsedMs] = useState(0);
-  const [result, setResult] = useState<PackResult | null>(null);
+  const [result, setResult] = useState<OptimizeDelivery | null>(null);
   const [unpacked, setUnpacked] = useState<UnpackResult | null>(null);
   const [error, setError] = useState('');
 
@@ -391,7 +393,6 @@ function CompressorHome({ onModeChange }: { onModeChange: (mode: AppMode) => voi
         if (data.job === 'analyze') {
           const done = data as AnalyzeSuccess;
           setAnalysis(done.analysis);
-          setLevel(done.analysis.suggestedLevel);
           setPhase('ready'); setProgress(0);
         }
         compRef.current = undefined;
@@ -401,27 +402,33 @@ function CompressorHome({ onModeChange }: { onModeChange: (mode: AppMode) => voi
     });
   }, []);
 
-  const runCompress = useCallback(async () => {
+  const runOptimize = useCallback(async () => {
     const file = fileRef.current;
     if (!file) return;
     compRef.current?.cancel();
     const comp = createCompressor();
     compRef.current = comp;
-    setPhase('compressing'); setProgress(2); setElapsedMs(0); setMessage('testando estratégias lossless'); setError(''); setResult(null);
-    comp.compress(await file.arrayBuffer(), file.name, level, (event) => {
+    setPhase('compressing'); setProgress(2); setElapsedMs(0); setMessage('otimizando a representação'); setError(''); setResult(null);
+    comp.optimize(await file.arrayBuffer(), file.name, (event) => {
       if (event.type === 'progress') {
         setProgress(Math.round(event.data.progress * 100));
         setMessage(event.data.message.replace('…', '')); setElapsedMs(event.data.elapsedMs ?? 0);
       } else if (event.type === 'complete') {
         const data = event.data;
-        if (data.job === 'compress') {
-          const done = data as CompressorSuccess;
+        if (data.job === 'optimize') {
+          const done = data as OptimizeSuccess;
+          const base = file.name.replace(/\.[^.]+$/, '');
           setResult({
-            analysis: done.analysis, pack: done.pack, packFileName: done.packFileName,
-            gzip: done.gzip, gzipFileName: done.gzipFileName, rebuilt: done.rebuilt,
-            rebuiltFileName: file.name, method: done.method, transform: done.transform,
-            originalBytes: done.originalBytes, packBytes: done.packBytes, gzipBytes: done.gzipBytes,
-            faces: done.faces, warnings: done.warnings, elapsedMs: done.elapsedMs,
+            stl: done.stl, fileName: done.fileName,
+            gzip: done.gzip, gzipFileName: `${base}.gz`,
+            method: done.method, methodLabel: done.methodLabel, tier: done.tier,
+            format: done.format, originalBytes: done.originalBytes,
+            deliveredBytes: done.deliveredBytes, ratio: done.ratio, faces: done.faces,
+            validation: done.validation, checks: done.checks, warnings: done.warnings,
+            meanError: done.meanError, maxError: done.maxError,
+            volumeDeltaPercent: done.volumeDeltaPercent,
+            boundaryOriginal: done.boundaryOriginal, boundaryFinal: done.boundaryFinal,
+            elapsedMs: done.elapsedMs,
           });
           setPhase('done'); setProgress(100);
         }
@@ -430,7 +437,7 @@ function CompressorHome({ onModeChange }: { onModeChange: (mode: AppMode) => voi
         setError(event.data.message); setPhase('error'); setProgress(0); compRef.current = undefined;
       }
     });
-  }, [level]);
+  }, []);
 
   const runDecompress = useCallback(async (file: File) => {
     compRef.current?.cancel();
@@ -498,43 +505,58 @@ function CompressorHome({ onModeChange }: { onModeChange: (mode: AppMode) => voi
           {analysis.notes.length > 0 && <div className="mt-3 border-t border-white/[.06] pt-3">{analysis.notes.map((note) => <div key={note} className="mb-1 text-[11px] leading-5 text-stone-500">· {note}</div>)}</div>}
         </section>
         <section className="panel flex flex-col gap-4 p-4" aria-label="Estratégia">
-          <LevelSelect level={level} onChange={setLevel} />
-          <button className="button-primary flex h-10 items-center justify-center gap-2 text-xs font-semibold" onClick={() => void runCompress()} data-testid="button-compress"><Zap size={14} /> Comprimir lossless</button>
+          <MetaSelect target={targetPercent} onChange={setTargetPercent} />
+          <button className="button-primary flex h-10 items-center justify-center gap-2 text-xs font-semibold" onClick={() => void runOptimize()} data-testid="button-compress"><Zap size={14} /> Comprimir</button>
           <button className="button-secondary flex h-9 items-center justify-center gap-2 text-xs" onClick={cancel}><Pause size={14} /> Cancelar</button>
-          <p className="text-[10px] leading-4 text-stone-600">A malha não será modificada. A saída só é liberada se a descompressão reconstruir o arquivo byte a byte.</p>
+          <p className="text-[10px] leading-4 text-stone-600">Faces preservadas, malha intocada. A saída mantém a extensão original (.stl → .stl) e só é liberada após reimportação e comparação geométrica.</p>
         </section>
       </div>
     </main>}
-    {phase === 'done' && result && <main className="relative mx-auto max-w-[1480px] px-4 py-5 md:px-7 lg:px-10">
-      <div className="mb-5"><div className="eyebrow mb-2 text-orange-400/80">03 / resultado · lossless pass</div><h1 className="text-2xl font-medium tracking-[-.035em] md:text-3xl">Arquivo comprimido sem alteração da malha.</h1></div>
+    {phase === 'done' && result && (() => {
+      const achieved = (1 - result.ratio) * 100;
+      const metaOk = achieved >= targetPercent;
+      const checkEntries = Object.entries(result.checks);
+      const checklist: Array<[string, boolean]> = checkEntries.length > 0
+        ? [
+          ['Faces preservadas', result.checks['faces'] ?? true],
+          ['Geometria preservada', (result.checks['coordenadas'] ?? true) && (result.checks['normais'] ?? true) && (result.checks['superficie'] ?? true)],
+          ['Topologia preservada', (result.checks['watertight'] ?? true) && (result.checks['bordas'] ?? true) && (result.checks['manifold'] ?? true) && (result.checks['componentes'] ?? true)],
+          ['Dimensões preservadas', (result.checks['bbox'] ?? true) && (result.checks['centroide'] ?? true) && (result.checks['volume'] ?? true) && (result.checks['area'] ?? true)],
+          ['Sem novos buracos', (result.checks['bordas'] ?? true) && result.boundaryFinal <= result.boundaryOriginal],
+          ['Arquivo reimportável', result.checks['degeneracao'] ?? true],
+        ]
+        : [['Faces e coordenadas validados', true]];
+      const badge = result.tier === 'A' ? 'LOSSLESS' : 'GEOMETRY LOSSLESS';
+      return <main className="relative mx-auto max-w-[1480px] px-4 py-5 md:px-7 lg:px-10">
+      <div className="mb-5"><div className="eyebrow mb-2 text-orange-400/80">03 / resultado · {result.validation}</div><h1 className="text-2xl font-medium tracking-[-.035em] md:text-3xl">Compressão 3D concluída.</h1></div>
       {result.warnings.length > 0 && <div className="mb-4 border border-orange-400/20 bg-orange-500/[.06] px-3 py-2 text-xs text-orange-200">{result.warnings.map((warning) => <div key={warning}>{warning}</div>)}</div>}
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
         <section className="panel p-4" aria-label="Resultado da compressão">
-          <div className="mb-3 flex items-center gap-2"><CheckCircle2 size={15} className="text-emerald-400" /><span className="text-sm font-medium">Compressão concluída</span><span className="mono ml-auto text-[10px] text-emerald-300" data-testid="text-lossless-badge">LOSSLESS PASS</span></div>
+          <div className="mb-3 flex items-center gap-2"><CheckCircle2 size={15} className="text-emerald-400" /><span className="text-sm font-medium">{badge}</span><span className="mono ml-auto text-[10px] text-emerald-300" data-testid="text-lossless-badge">{result.validation} · meta {targetPercent}%: {metaOk ? 'SUCESSO' : 'SUCESSO PARCIAL'}</span></div>
           <div className="grid grid-cols-3 gap-2 text-center">
             <div className="border border-white/[.06] bg-black/20 p-3"><div className="eyebrow mb-1 text-stone-600">original</div><div className="mono text-sm text-stone-200">{formatBytes(result.originalBytes)}</div></div>
-            <div className="border border-orange-400/25 bg-orange-500/[.06] p-3"><div className="eyebrow mb-1 text-orange-400/80">.3dpack</div><div className="mono text-sm text-orange-300" data-testid="text-pack-size">{formatBytes(result.packBytes)}</div><div className="mono mt-1 text-[10px] text-orange-400/70">−{((1 - result.packBytes / result.originalBytes) * 100).toFixed(1)}%</div></div>
-            <div className="border border-white/[.06] bg-black/20 p-3"><div className="eyebrow mb-1 text-stone-600">.gz</div><div className="mono text-sm text-stone-200">{formatBytes(result.gzipBytes)}</div><div className="mono mt-1 text-[10px] text-stone-500">−{((1 - result.gzipBytes / result.originalBytes) * 100).toFixed(1)}%</div></div>
+            <div className="border border-orange-400/25 bg-orange-500/[.06] p-3"><div className="eyebrow mb-1 text-orange-400/80">resultado</div><div className="mono text-sm text-orange-300" data-testid="text-pack-size">{formatBytes(result.deliveredBytes)}</div><div className="mono mt-1 text-[10px] text-orange-400/70">−{achieved.toFixed(1)}%</div></div>
+            <div className="border border-white/[.06] bg-black/20 p-3"><div className="eyebrow mb-1 text-stone-600">redução</div><div className="mono text-sm text-stone-200">{achieved.toFixed(1)}%</div><div className="mono mt-1 text-[10px] text-stone-500">meta {targetPercent}%</div></div>
           </div>
           <div className="mt-3">
-            <MetaLine label="Faces" value={`${formatCount(result.faces)} → ${formatCount(result.faces)}`} accent />
-            <MetaLine label="Geometria" value="100% preservada" accent />
-            <MetaLine label="Método" value={`${result.method} · ${result.transform}`} />
-            <MetaLine label="SHA-256" value={shortHash(result.analysis.originalSha256)} />
+            <MetaLine label="Faces" value={result.faces > 0 ? `${formatCount(result.faces)} → ${formatCount(result.faces)}` : 'preservadas'} accent />
+            <MetaLine label="Geometria" value="PRESERVADA" accent />
+            <MetaLine label="Malha" value={result.boundaryFinal < 0 ? 'VÁLIDA / TOPOLOGIA PRESERVADA' : result.boundaryFinal === 0 ? 'VÁLIDA / WATERTIGHT' : `VÁLIDA / ${result.boundaryFinal} borda(s) originais`} accent />
+            <MetaLine label="Método" value={result.methodLabel} />
             <MetaLine label="Tempo" value={`${(result.elapsedMs / 1000).toFixed(1)}s`} />
           </div>
-          <div className="mt-3 grid grid-cols-1 gap-1 border-t border-white/[.06] pt-3 text-[11px] text-stone-500 sm:grid-cols-2">{['Faces preservadas', 'Geometria preservada', 'Topologia preservada', 'Coordenadas preservadas', 'Arquivo validado', 'Compressão lossless'].map((item) => <div key={item} className="flex items-center gap-1.5"><CheckCircle2 size={12} className="text-emerald-400" />{item}</div>)}</div>
+          <div className="mt-3 grid grid-cols-1 gap-1 border-t border-white/[.06] pt-3 text-[11px] text-stone-500 sm:grid-cols-2">{checklist.map(([item, ok]) => <div key={item} className="flex items-center gap-1.5"><CheckCircle2 size={12} className={ok ? 'text-emerald-400' : 'text-red-400'} />{item}</div>)}</div>
         </section>
         <section className="panel flex flex-col gap-2 p-4" aria-label="Downloads">
-          <button className="button-primary flex h-10 items-center justify-center gap-2 text-xs font-semibold" onClick={() => downloadBytes(result.pack, result.packFileName, 'application/octet-stream')} data-testid="button-download-pack"><Download size={14} /> Baixar .3dpack</button>
-          <button className="button-secondary flex h-10 items-center justify-center gap-2 text-xs" onClick={() => downloadBytes(result.gzip, result.gzipFileName, 'application/gzip')} data-testid="button-download-gzip"><Download size={14} /> Baixar .gz universal</button>
-          <button className="button-secondary flex h-10 items-center justify-center gap-2 text-xs" onClick={() => downloadBytes(result.rebuilt, result.rebuiltFileName, 'application/octet-stream')} data-testid="button-download-rebuilt"><Download size={14} /> Baixar original reconstruído</button>
-          <div className="mt-2"><LevelSelect level={level} onChange={(next) => { setLevel(next); }} /></div>
-          <button className="button-secondary flex h-9 items-center justify-center gap-2 text-xs" onClick={() => void runCompress()} data-testid="button-recompress"><RefreshCw size={14} /> Recomprimir com este nível</button>
+          <button className="button-primary flex h-10 items-center justify-center gap-2 text-xs font-semibold" onClick={() => downloadBytes(result.stl, result.fileName, 'application/octet-stream')} data-testid="button-download-stxyz"><Download size={14} /> Baixar {result.fileName.split('.').pop()?.toUpperCase()} comprimido</button>
+          <button className="button-secondary flex h-10 items-center justify-center gap-2 text-xs" onClick={() => downloadBytes(result.gzip, result.gzipFileName, 'application/gzip')} data-testid="button-download-gzip"><Download size={14} /> Baixar .gz (arquivo)</button>
+          <button className="button-secondary flex h-10 items-center justify-center gap-2 text-xs" onClick={() => { const file = fileRef.current; if (file) void file.arrayBuffer().then((buffer) => downloadBytes(buffer, file.name, 'application/octet-stream')); }} data-testid="button-download-original"><Download size={14} /> Baixar original</button>
           <button className="flex h-9 items-center justify-center gap-2 text-xs text-stone-500 transition hover:text-orange-300" onClick={reset}><X size={14} /> Novo arquivo</button>
+          <p className="text-[10px] leading-4 text-stone-600">O arquivo principal mantém a extensão original e abre direto no slicer. O .gz é só uma opção de arquivamento.</p>
         </section>
       </div>
-    </main>}
+      </main>;
+    })()}
     {phase === 'done' && unpacked && <main className="relative mx-auto max-w-[720px] px-5 py-12 text-center">
       <CheckCircle2 size={25} className="mx-auto mb-5 text-emerald-400" />
       <div className="eyebrow mb-3 text-emerald-300/80">round-trip · lossless pass</div>

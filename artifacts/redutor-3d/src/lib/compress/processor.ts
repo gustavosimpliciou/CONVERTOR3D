@@ -9,11 +9,12 @@ import type {
   CompressorProgress,
   CompressorSuccess,
   DecompressSuccess,
+  OptimizeSuccess,
 } from '../mesh/types';
 
 export type CompressorEvent =
   | { type: 'progress'; data: CompressorProgress }
-  | { type: 'complete'; data: CompressorSuccess | DecompressSuccess | AnalyzeSuccess }
+  | { type: 'complete'; data: CompressorSuccess | DecompressSuccess | AnalyzeSuccess | OptimizeSuccess }
   | { type: 'error'; data: CompressorFailure };
 
 export function createCompressor() {
@@ -26,7 +27,7 @@ export function createCompressor() {
 
   const attach = (onEvent: (event: CompressorEvent) => void): void => {
     if (!worker) return;
-    worker.onmessage = (event: MessageEvent<CompressorProgress | CompressorSuccess | DecompressSuccess | CompressorFailure>) => {
+    worker.onmessage = (event: MessageEvent<CompressorProgress | CompressorSuccess | DecompressSuccess | AnalyzeSuccess | OptimizeSuccess | CompressorFailure>) => {
       if (event.data.type === 'progress') onEvent({ type: 'progress', data: event.data });
       else if (event.data.type === 'complete') {
         onEvent({ type: 'complete', data: event.data });
@@ -57,6 +58,13 @@ export function createCompressor() {
       worker = new Worker(new URL('./compressor.worker.ts', import.meta.url), { type: 'module' });
       attach(onEvent);
       worker.postMessage({ type: 'compress', buffer, fileName, level }, [buffer]);
+    },
+    /** Fluxo principal: entrega .stl/.obj válido com a malha intacta. */
+    optimize(buffer: ArrayBuffer, fileName: string, onEvent: (event: CompressorEvent) => void) {
+      terminate();
+      worker = new Worker(new URL('./compressor.worker.ts', import.meta.url), { type: 'module' });
+      attach(onEvent);
+      worker.postMessage({ type: 'optimize', buffer, fileName }, [buffer]);
     },
     decompressPack(buffer: ArrayBuffer, fileName: string, onEvent: (event: CompressorEvent) => void) {
       terminate();

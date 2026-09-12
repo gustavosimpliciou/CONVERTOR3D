@@ -7,6 +7,7 @@
     "hello": "tsx ./src/hello.ts",
     "validate:decimation": "tsx ./src/validate-decimation.ts",
     "validate:compression": "tsx ./src/validate-compression.ts",
+    "validate:stl-delivery": "tsx ./src/validate-stldelivery.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
