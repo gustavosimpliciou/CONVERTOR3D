@@ -8,8 +8,6 @@ import {
   FileWarning,
   LoaderCircle,
   LockKeyhole,
-  Maximize2,
-  MousePointer2,
   Pause,
   RefreshCw,
   ScanLine,
@@ -33,7 +31,6 @@ import type { AnalyzeSuccess, CompressAnalysis, DecompressSuccess, ImportTopolog
 
 export type AppMode = 'compress' | 'reduce';
 
-type Vec3 = [number, number, number];
 type AppPhase = 'empty' | 'ready' | 'processing' | 'complete' | 'error';
 type Unit = 'mm' | 'cm' | 'in';
 
@@ -82,16 +79,31 @@ function formatCount(value: number) {
   return new Intl.NumberFormat('pt-BR').format(Math.round(value));
 }
 
-function faceNormal(mesh: MeshData, triangle: number): Vec3 {
-  const { positions, indices } = mesh;
-  const ai = indices[triangle * 3] * 3;
-  const bi = indices[triangle * 3 + 1] * 3;
-  const ci = indices[triangle * 3 + 2] * 3;
-  const ab: Vec3 = [positions[bi] - positions[ai], positions[bi + 1] - positions[ai + 1], positions[bi + 2] - positions[ai + 2]];
-  const ac: Vec3 = [positions[ci] - positions[ai], positions[ci + 1] - positions[ai + 1], positions[ci + 2] - positions[ai + 2]];
-  const normal: Vec3 = [ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]];
-  const length = Math.hypot(...normal) || 1;
-  return [normal[0] / length, normal[1] / length, normal[2] / length];
+function useCompactViewport() {
+  useEffect(() => {
+    let frame = 0;
+    const fit = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const shell = document.querySelector<HTMLElement>('.compact-shell');
+        const main = shell?.querySelector<HTMLElement>(':scope > main');
+        if (!shell || !main) return;
+        const header = shell.querySelector('header')?.getBoundingClientRect().height ?? 0;
+        const footer = shell.querySelector('footer')?.getBoundingClientRect().height ?? 0;
+        const tabs = shell.querySelector(':scope > .mobile-mode-tabs')?.getBoundingClientRect().height ?? 0;
+        const available = shell.clientHeight - header - footer - tabs - 4;
+        const scale = Math.min(1, Math.max(0.1, available / Math.max(main.scrollHeight, 1)));
+        main.style.setProperty('--workspace-scale', String(scale));
+        main.style.setProperty('--workspace-overflow', `${main.offsetHeight * (1 - scale)}px`);
+      });
+    };
+    const observer = new MutationObserver(fit);
+    // Observe content changes, not style updates made by the sizing itself.
+    observer.observe(document.getElementById('root')!, { childList: true, subtree: true, characterData: true });
+    window.addEventListener('resize', fit);
+    fit();
+    return () => { observer.disconnect(); window.removeEventListener('resize', fit); cancelAnimationFrame(frame); };
+  }, []);
 }
 
 function LogoMark() {
@@ -122,67 +134,6 @@ function Dropzone({ onFiles, inputRef, accept, formatsLabel }: { onFiles: (files
   </div>;
 }
 
-function MeshViewport({ original, reduced, comparing, processing }: { original: MeshData; reduced?: MeshData; comparing: boolean; processing: boolean }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [viewMode, setViewMode] = useState<'solid' | 'wire'>('solid');
-  const [rotation, setRotation] = useState<[number, number]>([0.42, 0.2]);
-  const dragRef = useRef<{ x: number; y: number } | undefined>(undefined);
-  const data = comparing && reduced ? reduced : original;
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const context = canvas.getContext('2d');
-    const parent = canvas.parentElement;
-    if (!context || !parent) return;
-    const render = () => {
-      const ratio = window.devicePixelRatio || 1;
-      const width = parent.clientWidth;
-      const height = parent.clientHeight;
-      canvas.width = width * ratio; canvas.height = height * ratio;
-      context.setTransform(ratio, 0, 0, ratio, 0, 0);
-      context.clearRect(0, 0, width, height);
-      context.fillStyle = '#0b0a09'; context.fillRect(0, 0, width, height);
-      if (!data.indices.length) return;
-      const { min, max } = data.bounds;
-      const center: Vec3 = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
-      const span = Math.max(...data.bounds.size) || 1;
-      const [yaw, pitch] = rotation;
-      const project = (index: number): [number, number, number] => {
-        const at = index * 3;
-        let x = (data.positions[at] - center[0]) / span;
-        let y = (data.positions[at + 1] - center[1]) / span;
-        let z = (data.positions[at + 2] - center[2]) / span;
-        const cosY = Math.cos(yaw), sinY = Math.sin(yaw);
-        const rx = x * cosY - z * sinY; const rz = x * sinY + z * cosY;
-        const cosX = Math.cos(pitch), sinX = Math.sin(pitch);
-        const ry = y * cosX - rz * sinX; const depth = y * sinX + rz * cosX;
-        return [width / 2 + rx * width * .78, height / 2 - ry * height * .78, depth];
-      };
-      const triangles = data.indices.length / 3;
-      const step = Math.max(1, Math.floor(triangles / 2600));
-      context.lineJoin = 'round'; context.lineWidth = 1;
-      for (let triangle = 0; triangle < triangles; triangle += step) {
-        const ia = data.indices[triangle * 3], ib = data.indices[triangle * 3 + 1], ic = data.indices[triangle * 3 + 2];
-        const a = project(ia), b = project(ib), c = project(ic);
-        const n = faceNormal(data, triangle);
-        const light = Math.max(.1, Math.min(1, .48 + n[0] * .24 + n[1] * .3 + n[2] * .2));
-        context.beginPath(); context.moveTo(a[0], a[1]); context.lineTo(b[0], b[1]); context.lineTo(c[0], c[1]); context.closePath();
-        if (viewMode === 'solid') { context.fillStyle = `rgba(221, ${Math.round(76 + light * 42)}, ${Math.round(27 + light * 22)}, ${.08 + light * .16})`; context.fill(); }
-        context.strokeStyle = comparing ? `rgba(255, 145, 70, ${.19 + light * .3})` : `rgba(215, 95, 39, ${.16 + light * .28})`; context.stroke();
-      }
-      context.strokeStyle = 'rgba(244, 123, 57, .35)'; context.lineWidth = 1; context.beginPath(); context.moveTo(24, height - 28); context.lineTo(84, height - 28); context.stroke(); context.fillStyle = 'rgba(181, 174, 165, .48)'; context.font = '10px DM Mono'; context.fillText('eixo X', 88, height - 25);
-    };
-    render();
-    const observer = new ResizeObserver(render); observer.observe(parent);
-    return () => observer.disconnect();
-  }, [data, comparing, processing, rotation, viewMode]);
-
-  return <div className="relative h-full min-h-[420px] overflow-hidden border border-white/[.08] bg-[#0b0a09]" data-testid="viewport-mesh" onPointerDown={(event) => { dragRef.current = { x: event.clientX, y: event.clientY }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={(event) => { if (!dragRef.current) return; setRotation(([yaw, pitch]) => [yaw + (event.clientX - dragRef.current!.x) * .008, Math.max(-1.1, Math.min(1.1, pitch + (event.clientY - dragRef.current!.y) * .008))]); dragRef.current = { x: event.clientX, y: event.clientY }; }} onPointerUp={() => { dragRef.current = undefined; }} onPointerCancel={() => { dragRef.current = undefined; }}>
-    <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" /><div className="pointer-events-none absolute inset-0" style={{ background: 'radial-gradient(ellipse at center, transparent 35%, rgba(0,0,0,.28) 100%)' }} /><div className="absolute left-4 top-4 flex items-center gap-2"><span className="h-1.5 w-1.5 bg-orange-400" /><span className="eyebrow text-stone-400">{processing ? 'analisando malha' : comparing ? 'malha reduzida' : 'malha original'}</span></div><div className="absolute right-3 top-3 flex gap-1 border border-white/10 bg-black/45 p-1"><button className={`px-2 py-1 text-[10px] ${viewMode === 'solid' ? 'bg-orange-500/20 text-orange-300' : 'text-stone-600'}`} onClick={() => setViewMode('solid')} data-testid="button-view-solid">Sólido</button><button className={`px-2 py-1 text-[10px] ${viewMode === 'wire' ? 'bg-orange-500/20 text-orange-300' : 'text-stone-600'}`} onClick={() => setViewMode('wire')} data-testid="button-view-wire">Wire</button></div><div className="absolute bottom-4 right-4 flex items-center gap-2 text-[10px] text-stone-600"><MousePointer2 size={12} /> arraste para orbitar <Maximize2 size={12} /></div>{processing && <div className="processing-line absolute bottom-0 left-0 h-px w-full bg-orange-400" />}
-  </div>;
-}
-
 function MetaLine({ label, value, accent = false }: { label: string; value: string; accent?: boolean }) {
   return <div className="flex items-center justify-between py-1 text-xs"><span className="text-stone-600">{label}</span><span className={accent ? 'mono text-orange-300' : 'mono text-stone-300'}>{value}</span></div>;
 }
@@ -200,7 +151,7 @@ const STAGE_LABELS: Record<Stage, string> = {
 function ProcessingView({ progress, message, elapsedMs, stage, originalTriangles, currentTriangles, targetTriangles, onCancel }: { progress: number; message: string; elapsedMs: number; stage: Stage; originalTriangles: number; currentTriangles: number; targetTriangles: number; onCancel: () => void }) {
   const stageIndex = Math.max(0, STAGES.indexOf(stage));
   const reduction = originalTriangles > 0 ? Math.max(0, ((originalTriangles - currentTriangles) / originalTriangles) * 100) : 0;
-  return <div className="mx-auto grid min-h-[calc(100dvh-66px)] max-w-[1320px] grid-cols-1 content-center gap-6 px-5 py-10 md:px-10 lg:grid-cols-[1fr_370px]"><div className="panel relative min-h-[470px] overflow-hidden bg-black/25 p-8 md:p-12"><div className="pointer-events-none absolute inset-0 flex items-center justify-center"><div className="border border-orange-400/25 bg-black/75 px-5 py-4 backdrop-blur-sm"><div className="flex items-center gap-3"><LoaderCircle size={16} className="spinner text-orange-400" /><span className="eyebrow text-orange-300">{message}</span></div></div></div></div><div className="flex flex-col justify-center"><div className="eyebrow mb-3 text-orange-400/80">02 / processamento · {STAGE_LABELS[stage]}</div><div className="mono mb-3 text-xs text-orange-300">{Math.min(60, elapsedMs / 1000).toFixed(1)}s / 60s</div><h1 className="text-3xl font-medium tracking-[-.04em]">A forma está sendo<br /><span className="text-stone-500">recalculada.</span></h1><p className="mt-4 text-sm leading-6 text-stone-500">O Redutor está analisando a topologia e redistribuindo a malha no seu dispositivo.</p><div className="mono mt-4 grid grid-cols-3 gap-2 border border-white/[.06] bg-black/20 px-3 py-2 text-[10px]"><span className="text-stone-600">orig <span className="text-stone-300">{formatCount(originalTriangles)}</span></span><span className="text-stone-600">atual <span className="text-orange-300">{formatCount(currentTriangles)}</span></span><span className="text-stone-600">alvo <span className="text-stone-300">{formatCount(targetTriangles)}</span> · −{reduction.toFixed(1)}%</span></div><div className="mt-10"><div className="mb-2 flex items-end justify-between"><span className="mono text-[11px] text-stone-600">progresso local</span><span className="mono text-2xl text-orange-300" data-testid="text-processing-progress">{Math.round(progress)}%</span></div><div className="h-1 bg-stone-800"><div className="h-1 bg-orange-400 transition-[width] duration-150" style={{ width: `${progress}%` }} /></div><div className="mt-4 grid grid-cols-5 gap-2 text-[10px] text-stone-600">{STAGES.map((step, index) => <span key={step} className={index <= stageIndex ? 'text-orange-300' : ''}>{STAGE_LABELS[step]}</span>)}</div></div><button className="button-secondary mt-10 flex h-10 items-center justify-center gap-2 text-xs" onClick={onCancel} data-testid="button-cancel-processing"><Pause size={14} /> Cancelar processamento</button><div className="mt-5 flex items-center gap-2 text-[10px] text-stone-600"><LockKeyhole size={12} /> nada é enviado para a nuvem</div></div></div>;
+  return <main className="mx-auto grid min-h-[calc(100dvh-66px)] max-w-[1320px] grid-cols-1 content-center gap-6 px-5 py-10 md:px-10 lg:grid-cols-[1fr_370px]"><div className="panel relative min-h-[470px] overflow-hidden bg-black/25 p-8 md:p-12"><div className="pointer-events-none absolute inset-0 flex items-center justify-center"><div className="border border-orange-400/25 bg-black/75 px-5 py-4 backdrop-blur-sm"><div className="flex items-center gap-3"><LoaderCircle size={16} className="spinner text-orange-400" /><span className="eyebrow text-orange-300">{message}</span></div></div></div></div><div className="flex flex-col justify-center"><div className="eyebrow mb-3 text-orange-400/80">02 / processamento · {STAGE_LABELS[stage]}</div><div className="mono mb-3 text-xs text-orange-300">{Math.min(60, elapsedMs / 1000).toFixed(1)}s / 60s</div><h1 className="text-3xl font-medium tracking-[-.04em]">A forma está sendo<br /><span className="text-stone-500">recalculada.</span></h1><p className="mt-4 text-sm leading-6 text-stone-500">O Redutor está analisando a topologia e redistribuindo a malha no seu dispositivo.</p><div className="mono mt-4 grid grid-cols-3 gap-2 border border-white/[.06] bg-black/20 px-3 py-2 text-[10px]"><span className="text-stone-600">orig <span className="text-stone-300">{formatCount(originalTriangles)}</span></span><span className="text-stone-600">atual <span className="text-orange-300">{formatCount(currentTriangles)}</span></span><span className="text-stone-600">alvo <span className="text-stone-300">{formatCount(targetTriangles)}</span> · −{reduction.toFixed(1)}%</span></div><div className="mt-10"><div className="mb-2 flex items-end justify-between"><span className="mono text-[11px] text-stone-600">progresso local</span><span className="mono text-2xl text-orange-300" data-testid="text-processing-progress">{Math.round(progress)}%</span></div><div className="h-1 bg-stone-800"><div className="h-1 bg-orange-400 transition-[width] duration-150" style={{ width: `${progress}%` }} /></div><div className="mt-4 grid grid-cols-5 gap-2 text-[10px] text-stone-600">{STAGES.map((step, index) => <span key={step} className={index <= stageIndex ? 'text-orange-300' : ''}>{STAGE_LABELS[step]}</span>)}</div></div><button className="button-secondary mt-10 flex h-10 items-center justify-center gap-2 text-xs" onClick={onCancel} data-testid="button-cancel-processing"><Pause size={14} /> Cancelar processamento</button><div className="mt-5 flex items-center gap-2 text-[10px] text-stone-600"><LockKeyhole size={12} /> nada é enviado para a nuvem</div></div></main>;
 }
 
   function ErrorState({ message, onReset, title }: { message: string; onReset: () => void; title?: string }) {
@@ -391,13 +342,13 @@ function LosslessHome({ onModeChange }: { onModeChange: (mode: AppMode) => void 
 
   useEffect(() => () => { compRef.current?.cancel(); }, []);
 
-  return <div className="app-shell dark">
+  return <div className="app-shell compact-shell dark">
     <Header hasModel={phase !== 'empty' && phase !== 'error'} onImport={() => inputRef.current?.click()} onReset={reset} mode="reduce" onMode={onModeChange} title="LOSSLESS" />
-    <div className="px-5 pt-3 md:hidden"><ModeTabs mode="reduce" onMode={onModeChange} /></div>
+    <div className="mobile-mode-tabs px-5 pt-3 md:hidden"><ModeTabs mode="reduce" onMode={onModeChange} /></div>
     {phase === 'empty' && <main className="relative mx-auto flex min-h-[calc(100dvh-66px)] max-w-[1320px] flex-col justify-center px-5 py-12 md:px-10">
       <div className="mb-8 flex items-end justify-between animate-in"><div><div className="eyebrow mb-3 text-orange-400/80">otimização sem alterar a malha</div><h1 className="max-w-xl text-3xl font-medium tracking-[-.04em] text-stone-100 md:text-5xl">Arquivo menor.<br /><span className="text-stone-500">Malha intocada.</span></h1></div><div className="hidden max-w-[210px] text-right text-xs leading-5 text-stone-600 md:block">Representação eficiente sem mover um único vértice.</div></div>
       <div className="animate-in-delay"><Dropzone onFiles={handleFiles} inputRef={inputRef} accept={COMPRESS_ACCEPT} formatsLabel={COMPRESS_FORMATS_LABEL} /></div>
-      <div className="mt-6 grid grid-cols-1 gap-px border border-white/[.06] bg-white/[.06] sm:grid-cols-3 animate-in-delay">{[{ icon: LockKeyhole, title: '100% local', copy: 'O arquivo nunca sai deste navegador.' }, { icon: ShieldCheck, title: 'Lossless verificado', copy: 'SHA-256 do round-trip precisa conferir.' }, { icon: Box, title: 'Faces inalteradas', copy: '1.500.000 entram, 1.500.000 saem.' }].map(({ icon: Icon, title, copy }) => <div key={title} className="bg-stone-950/75 p-4"><Icon size={15} className="mb-3 text-orange-400" /><div className="text-xs font-medium">{title}</div><div className="mt-1 text-[11px] text-stone-600">{copy}</div></div>)}</div>
+      <div className="landing-features mt-6 grid grid-cols-1 gap-px border border-white/[.06] bg-white/[.06] sm:grid-cols-3 animate-in-delay">{[{ icon: LockKeyhole, title: '100% local', copy: 'O arquivo nunca sai deste navegador.' }, { icon: ShieldCheck, title: 'Lossless verificado', copy: 'SHA-256 do round-trip precisa conferir.' }, { icon: Box, title: 'Faces inalteradas', copy: '1.500.000 entram, 1.500.000 saem.' }].map(({ icon: Icon, title, copy }) => <div key={title} className="bg-stone-950/75 p-4"><Icon size={15} className="mb-3 text-orange-400" /><div className="text-xs font-medium">{title}</div><div className="mt-1 text-[11px] text-stone-600">{copy}</div></div>)}</div>
     </main>}
     {phase === 'error' && <><input ref={inputRef} type="file" accept={COMPRESS_ACCEPT} className="hidden" onChange={(event) => handleFiles(event.target.files)} data-testid="input-error-file" /><ErrorState message={error} onReset={() => inputRef.current?.click()} /></>}
     {(phase === 'analyzing' || phase === 'compressing') && <ImportingView progress={progress} message={`${message} · ${(elapsedMs / 1000).toFixed(1)}s`} />}
@@ -524,7 +475,6 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
   const [stage, setStage] = useState<Stage>('ANALISANDO');
   const [liveTriangles, setLiveTriangles] = useState(0);
   const [liveOriginal, setLiveOriginal] = useState(0);
-  const [comparing, setComparing] = useState(false);
   const [reduced, setReduced] = useState<ReducedResult | null>(null);
   const [topology, setTopology] = useState<ImportTopology | null>(null);
   const [quirks, setQuirks] = useState<string[]>([]);
@@ -537,7 +487,7 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
     fileRef.current = undefined;
     setPhase('empty'); setModel(undefined); setReduced(null); setError('');
     setTopology(null); setQuirks([]); setNotice('');
-    setProgress(0); setComparing(false); setElapsedMs(0);
+    setProgress(0); setElapsedMs(0);
   }, []);
 
   const runImport = useCallback(async (file: File) => {
@@ -632,7 +582,7 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
               stats: result.reduced, mesh, stl: result.stl.buffer, report: ensureReport(result.report),
               validation: result.validation, warnings: Array.isArray(result.warnings) ? result.warnings : [],
             });
-            setComparing(true); setProgress(100); setPhase('done');
+            setProgress(100); setPhase('done');
           }
           procRef.current = undefined;
         } else {
@@ -680,13 +630,14 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
   const targetFaces = model && fileRef.current ? targetFacesToKeep(model.stats.triangles, targetPercent) : 0;
   const canReduce = !!model && targetFaces < model.stats.triangles;
 
-  return <div className="app-shell dark">
+  return <div className="app-shell compact-shell dark">
+    {phase !== 'empty' && phase !== 'error' && <input ref={inputRef} type="file" accept=".stl,model/stl" className="hidden" onChange={(event) => handleFiles(event.target.files)} />}
     <Header hasModel={phase !== 'empty' && phase !== 'error'} onImport={() => inputRef.current?.click()} onReset={reset} mode="compress" onMode={onModeChange} title="COMPRESSÃO" />
-    <div className="px-5 pt-3 md:hidden"><ModeTabs mode="compress" onMode={onModeChange} /></div>
+    <div className="mobile-mode-tabs px-5 pt-3 md:hidden"><ModeTabs mode="compress" onMode={onModeChange} /></div>
     {phase === 'empty' && <main className="relative mx-auto flex min-h-[calc(100dvh-66px)] max-w-[1320px] flex-col justify-center px-5 py-12 md:px-10">
       <div className="mb-8 flex items-end justify-between animate-in"><div><div className="eyebrow mb-3 text-orange-400/80">01 / entrada · redução inteligente</div><h1 className="max-w-xl text-3xl font-medium tracking-[-.04em] text-stone-100 md:text-5xl">Menos faces.<br /><span className="text-stone-500">Qualidade protegida.</span></h1></div><div className="hidden max-w-[210px] text-right text-xs leading-5 text-stone-600 md:block">Áreas simples financiam a redução. Features ficam protegidas.</div></div>
       <div className="animate-in-delay"><Dropzone onFiles={handleFiles} inputRef={inputRef} accept=".stl,model/stl" formatsLabel="STL BINÁRIO · STL ASCII" /></div>
-      <div className="mt-6 grid grid-cols-1 gap-px border border-white/[.06] bg-white/[.06] sm:grid-cols-3 animate-in-delay">{[{ icon: ScanLine, title: 'Mapa de importância', copy: 'Cada região recebe um peso geométrico.' }, { icon: ShieldCheck, title: 'Features protegidas', copy: 'Olhos, dedos e relevos sob lock.' }, { icon: FileBox, title: 'STL pronto', copy: 'Saída válida para o slicer.' }].map(({ icon: Icon, title, copy }) => <div key={title} className="bg-stone-950/75 p-4"><Icon size={15} className="mb-3 text-orange-400" /><div className="text-xs font-medium">{title}</div><div className="mt-1 text-[11px] text-stone-600">{copy}</div></div>)}</div>
+      <div className="landing-features mt-6 grid grid-cols-1 gap-px border border-white/[.06] bg-white/[.06] sm:grid-cols-3 animate-in-delay">{[{ icon: ScanLine, title: 'Mapa de importância', copy: 'Cada região recebe um peso geométrico.' }, { icon: ShieldCheck, title: 'Features protegidas', copy: 'Olhos, dedos e relevos sob lock.' }, { icon: FileBox, title: 'STL pronto', copy: 'Saída válida para o slicer.' }].map(({ icon: Icon, title, copy }) => <div key={title} className="bg-stone-950/75 p-4"><Icon size={15} className="mb-3 text-orange-400" /><div className="text-xs font-medium">{title}</div><div className="mt-1 text-[11px] text-stone-600">{copy}</div></div>)}</div>
     </main>}
     {phase === 'error' && <><input ref={inputRef} type="file" accept=".stl,model/stl" className="hidden" onChange={(event) => handleFiles(event.target.files)} data-testid="input-error-file" /><ErrorState message={error} onReset={() => inputRef.current?.click()} title={error.includes('redução segura') ? 'Nenhuma redução segura foi possível.' : undefined} /></>}
     {phase === 'importing' && <ImportingView progress={progress} message={message} />}
@@ -730,54 +681,55 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
       const silOk = reduced.report.silhouetteError <= PROFILE_SIL_LIMIT[profile];
       const valid = reduced.validation.qualityAccepted && reduced.validation.boundaryLoops <= reduced.report.boundaryOriginal && reduced.validation.nonManifoldEdges === 0;
       const fidelity = profile === 'quality' ? 'FIDELIDADE MÁXIMA' : profile === 'balanced' ? 'ALTA FIDELIDADE' : 'FIDELIDADE CONTROLADA';
-      return <main className="relative mx-auto max-w-[1480px] px-4 py-5 md:px-7 lg:px-10">
-      <div className="mb-5"><div className="eyebrow mb-2 text-orange-400/80">03 / resultado · {reduced.report.stoppedReason === 'target' ? 'meta atingida' : 'redução máxima segura'}</div><h1 className="text-2xl font-medium tracking-[-.035em] md:text-3xl">Compressão 3D concluída.</h1></div>
-      {(reduced.report.stoppedReason === 'quality' || reduced.report.stoppedReason === 'stall' || reduced.report.stoppedReason === 'time') && <div className="mb-4 border border-orange-400/20 bg-orange-500/[.06] px-3 py-2 text-xs text-orange-200">Processamento encerrado dentro dos limites verificados. A meta pode não ter sido atingida. {reduced.report.escalations > 0 ? `O sistema redistribuiu a redução ${reduced.report.escalations}x para áreas simples.` : ''}</div>}
-      {reduced.warnings.length > 0 && <div className="mb-4 border border-white/[.08] bg-black/20 px-3 py-2 text-xs text-stone-400">{reduced.warnings.slice(0, 3).map((warning) => <div key={warning}>{warning}</div>)}</div>}
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
-        <div className="min-w-0">
-          <MeshViewport original={model.mesh} reduced={reduced.mesh} comparing={comparing} processing={false} />
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border border-white/[.07] bg-black/20 px-3 py-2">
-            <button className="flex items-center gap-2 text-xs text-stone-400 transition hover:text-orange-300" onClick={() => setComparing(!comparing)} data-testid="button-toggle-comparison">{comparing ? 'Exibindo reduzida — ver original' : 'Exibindo original — ver reduzida'}</button>
-            <span className="mono text-[10px] text-stone-600">{formatCount(model.stats.triangles)} → {formatCount(reduced.stats.triangles)} faces</span>
-          </div>
-          <section className="panel mt-4 p-4" aria-label="Relatório de qualidade">
-            <div className="mb-2 flex items-center gap-2"><ScanLine size={15} className="text-orange-400" /><span className="text-sm font-medium">Relatório de qualidade</span></div>
-            <MetaLine label="Redução de tamanho" value={`${achieved.toFixed(1)}%`} accent />
-            <MetaLine label="Redução de faces" value={`${formatCount(model.stats.triangles)} → ${formatCount(reduced.stats.triangles)}`} />
-            <MetaLine label="Faces mantidas" value={`${(reduced.stats.triangles / model.stats.triangles * 100).toFixed(1)}% (meta ${targetPercent}%: ${metaOk ? 'atingida' : 'parada pelos limites'})`} />
-            <MetaLine label="Desvio médio amostrado" value={`${(reduced.report.meanError * 100).toFixed(3)}%`} />
-            <MetaLine label="Desvio máximo amostrado" value={`${(reduced.report.maxError * 100).toFixed(3)}%`} />
-            {reduced.report.engine !== 'meshoptimizer' && <MetaLine label="Erro RMS" value={`${((reduced.report.rmsError ?? 0) * 100).toFixed(3)}%`} />}
-            <MetaLine label="Reconstrução" value={(() => { const h = reduced.report.healing; if (!h || h.defectsFound === 0) return 'nenhum reparo executado'; return `${h.defectsRepaired} corrigidos · ${h.facesAdded} faces`; })()} accent />
-            {reduced.report.engine !== 'meshoptimizer' && <>
-            <MetaLine label="Erro de silhueta" value={`${(reduced.report.silhouetteError * 100).toFixed(2)}% ${silOk ? '· PASS' : '· REVISAR'}`} />
-            <MetaLine label="Erro de normal" value={reduced.report.normalError.toFixed(4)} />
-            <MetaLine label="Erro de curvatura" value={reduced.report.curvatureError.toFixed(4)} />
-            </>}
-            <MetaLine label="Alteração de volume" value={`${reduced.report.volumeDeltaPercent.toFixed(2)}%`} />
-            <MetaLine label="Buracos novos" value={reduced.report.boundaryFinal <= reduced.report.boundaryOriginal ? '0' : `${reduced.report.boundaryFinal - reduced.report.boundaryOriginal}`} />
-            <MetaLine label="Non-manifold" value={`${reduced.report.nonManifoldEdges}`} />
-            <MetaLine label="Triângulos degenerados" value={`${reduced.report.degenerateTriangles}`} />
-            <MetaLine label="Tempo de processamento" value={`${(elapsedMs / 1000).toFixed(1)}s`} />
-          </section>
+      const rows: Array<[string, string]> = [
+        ['Faces originais', formatCount(model.stats.triangles)],
+        ['Faces reduzidas', formatCount(reduced.stats.triangles)],
+        ['Faces mantidas', `${(reduced.stats.triangles / model.stats.triangles * 100).toFixed(1)}%`],
+        ['Meta solicitada', `${targetPercent}% · ${metaOk ? 'atingida' : 'parada pelos limites'}`],
+        ['Desvio médio amostrado', `${(reduced.report.meanError * 100).toFixed(3)}%`],
+        ['Desvio máximo amostrado', `${(reduced.report.maxError * 100).toFixed(3)}%`],
+        ['Alteração de volume', `${reduced.report.volumeDeltaPercent.toFixed(3)}%`],
+        ['Alteração de área', `${reduced.report.areaDeltaPercent.toFixed(3)}%`],
+        ['Aberturas original → final', `${reduced.report.boundaryOriginal} → ${reduced.report.boundaryFinal}`],
+        ['Novas aberturas', `${Math.max(0, reduced.report.boundaryFinal - reduced.report.boundaryOriginal)}`],
+        ['Arestas non-manifold', `${reduced.report.nonManifoldEdges}`],
+        ['Triângulos degenerados', `${reduced.report.degenerateTriangles}`],
+        ['Malha fechada', reduced.validation.watertight ? 'Sim' : 'Bordas originais'],
+        ['Componentes', `${reduced.report.components ?? '—'}`],
+        ['Qualidade', fidelity],
+        ['Validação', valid ? 'Aprovada' : 'Revisar'],
+        ['Etapas de validação', `${reduced.report.stages}`],
+        ['Tempo de processamento', `${(elapsedMs / 1000).toFixed(1)}s`],
+        ['Reconstrução', reduced.report.healing.defectsRepaired > 0 ? `${reduced.report.healing.defectsRepaired} reparos · ${reduced.report.healing.facesAdded} faces` : 'Nenhum reparo executado'],
+        ['Encerramento', reduced.report.stoppedReason === 'target' ? 'Meta atingida' : reduced.report.stoppedReason === 'time' ? 'Limite de tempo' : 'Limite de qualidade'],
+      ];
+      if (reduced.report.engine !== 'meshoptimizer') rows.push(
+        ['Erro RMS', `${(reduced.report.rmsError * 100).toFixed(3)}%`],
+        ['Erro de silhueta', `${(reduced.report.silhouetteError * 100).toFixed(2)}% · ${silOk ? 'PASS' : 'REVISAR'}`],
+        ['Erro de normal', reduced.report.normalError.toFixed(4)],
+        ['Erro de curvatura', reduced.report.curvatureError.toFixed(4)],
+      );
+      return <main className="compact-result" data-testid="reduction-result">
+        <div className="result-success" role="status">
+          <CheckCircle2 size={22} className="shrink-0 text-emerald-400" />
+          <div className="min-w-0"><h1>Redução concluída com sucesso</h1><p className="truncate text-stone-500" title={model.name}>{model.name}</p></div>
+          <span className="result-badge">{valid ? 'VALIDADO' : 'REVISAR'}</span>
         </div>
-        <section className="panel flex h-fit flex-col gap-2 p-4 lg:sticky lg:top-4" aria-label="Downloads">
-          <div className="mb-1 grid grid-cols-3 gap-2 text-center">
-            <div className="border border-white/[.06] bg-black/20 p-3"><div className="eyebrow mb-1 text-stone-600">original</div><div className="mono text-sm text-stone-200">{formatBytes(model.bytes)}</div></div>
-            <div className="border border-orange-400/25 bg-orange-500/[.06] p-3"><div className="eyebrow mb-1 text-orange-400/80">resultado</div><div className="mono text-sm text-orange-300" data-testid="text-result-size">{formatBytes(reduced.stl.byteLength)}</div><div className="mono mt-1 text-[10px] text-orange-400/70">−{achieved.toFixed(1)}%</div></div>
-            <div className="border border-white/[.06] bg-black/20 p-3"><div className="eyebrow mb-1 text-stone-600">faces</div><div className="mono text-sm text-stone-200">{formatCount(reduced.stats.triangles)}</div></div>
-          </div>
-          <MetaLine label="Geometria" value={fidelity} accent />
-          {reduced.report.effectiveProfile && reduced.report.effectiveProfile !== profile && <MetaLine label="Estratégia final" value={`perfil ${reduced.report.effectiveProfile} (escalonado)`} accent />}
-          <MetaLine label="Malha" value={reduced.report.boundaryFinal <= 0 ? 'VÁLIDA' : 'VÁLIDA / bordas originais'} accent />
-          <MetaLine label="Watertight" value={reduced.validation.watertight ? 'PASS' : '—'} accent />
-          <MetaLine label="Validação" value={valid ? '✓ PASS' : 'REVISAR'} accent />
-          <button className="button-primary mt-2 flex h-10 items-center justify-center gap-2 text-xs font-semibold" onClick={() => downloadStl(reduced.stl, model.name)} disabled={!valid} data-testid="button-download-stl"><Download size={14} /> Baixar STL comprimido</button>
-          <button className="button-secondary flex h-10 items-center justify-center gap-2 text-xs" onClick={downloadGzip} disabled={gzBusy || !valid} data-testid="button-download-gzip"><Download size={14} /> {gzBusy ? 'Gerando .gz…' : 'Baixar .gz (arquivo)'}</button>
-          <button className="flex h-9 items-center justify-center gap-2 text-xs text-stone-500 transition hover:text-orange-300" onClick={reset}><X size={14} /> Novo arquivo</button>
+        {reduced.warnings.length > 0 && <div className="result-notice">{reduced.warnings.join(' ')}</div>}
+        <div className="result-totals">
+          <div><span>Arquivo original</span><strong>{formatBytes(model.bytes)}</strong></div>
+          <div><span>STL reduzido</span><strong data-testid="text-result-size">{formatBytes(reduced.stl.byteLength)}</strong></div>
+          <div><span>Redução de tamanho</span><strong>{achieved.toFixed(1)}%</strong></div>
+        </div>
+        <section className="result-report" aria-label="Informações da redução">
+          {rows.map(([label, value]) => <div className="result-metric" key={label}><span>{label}</span><strong>{value}</strong></div>)}
         </section>
-      </div>
+        <div className="result-actions" aria-label="Downloads">
+          <button className="button-primary" onClick={() => downloadStl(reduced.stl, model.name)} disabled={!valid} data-testid="button-download-stl"><Download size={14} /> Baixar STL reduzido</button>
+          <button className="button-secondary" onClick={downloadGzip} disabled={gzBusy || !valid} data-testid="button-download-gzip"><Download size={14} /> {gzBusy ? 'Gerando .gz…' : 'Baixar .gz'}</button>
+          <button className="button-secondary" onClick={() => { setReduced(null); setPhase('ready'); }}><SlidersHorizontal size={14} /> Nova redução</button>
+          <button className="button-secondary" onClick={reset}><X size={14} /> Novo arquivo</button>
+        </div>
       </main>;
     })()}
     <footer className="pointer-events-none fixed bottom-3 left-5 right-5 z-10 flex justify-between mono text-[9px] text-stone-700 md:left-8 md:right-8"><span>COMPRESSÃO 3D / BUILD 5.0.0</span><span className="hidden sm:block">ADAPTIVE QEM · LOCAL FIRST</span></footer>
@@ -789,6 +741,7 @@ function reducedName(name: string): string {
 }
 
 function Home() {
+  useCompactViewport();
   const [mode, setMode] = useState<AppMode>('compress');
   const onModeChange = useCallback((next: AppMode) => setMode(next), []);
   return <>
