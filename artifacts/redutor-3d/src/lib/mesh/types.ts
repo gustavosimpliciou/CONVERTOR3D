@@ -19,6 +19,12 @@ export interface MeshData {
   indices: Uint32Array;
   format: MeshFormat;
   bounds: Bounds;
+  /** Atributos opcionais preservados ao longo da decimação (quando o formato traz). */
+  uvs?: Float32Array;
+  colors?: Float32Array;
+  materialIds?: Uint32Array;
+  skinWeights?: Float32Array;
+  skinJoints?: Uint16Array;
 }
 
 export interface MeshStats {
@@ -33,6 +39,20 @@ export type Quality = 'low' | 'medium' | 'high' | 'ultra';
 
 /** Perfil de redução (fluxo COMPRESSÃO 3D): quality = fidelidade máxima. */
 export type ReductionProfile = 'quality' | 'balanced' | 'aggressive' | 'maximum';
+
+/** Modo de definição do alvo — paridade com ferramentas profissionais (rigbake). */
+export type TargetMode = 'percent' | 'exact' | 'device' | 'smart';
+export type SmartLevel = 'quality' | 'balanced' | 'aggressive';
+export type DevicePreset = 'background' | 'held' | 'mobile' | 'desktop' | 'hero';
+
+export interface TriangleBudget {
+  mode: TargetMode;
+  /** percent: fração a MANTER (0..100). Ex.: 50 = mantém metade. */
+  percent?: number;
+  exactTriangles?: number;
+  device?: DevicePreset;
+  smartLevel?: SmartLevel;
+}
 
 /** Limites configuráveis (MAX_*): tetos de erro por operação e estágio. */
 export interface ReductionLimits {
@@ -56,6 +76,18 @@ export interface SimplifyOptions {
   /** Quando presente, governa pisos e tetos (legado `quality` vira fallback). */
   profile?: ReductionProfile;
   limits?: ReductionLimits;
+  /** Modo profissional do alvo (para relatório / rollback inteligente). */
+  targetMode?: TargetMode;
+  smartLevel?: SmartLevel;
+  /** Orçamento de erro geométrico como fração da diagonal (ex.: 0.002 = 0,2%). */
+  errorBudget?: number;
+  /** Piso mínimo de triângulos por componente conectado (peças pequenas não somem). */
+  minComponentTriangles?: number;
+  /** Preservação de atributos (quando o formato de origem traz). */
+  preserveUV?: boolean;
+  preserveMaterials?: boolean;
+  preserveColors?: boolean;
+  preserveSkinning?: boolean;
 }
 
 export interface HealingLogEntry {
@@ -81,6 +113,7 @@ export interface HealingSummary {
 
 /** Relatório de qualidade da redução (números reais do arquivo produzido). */
 export interface SimplifyReport {
+  engine?: 'meshoptimizer' | 'adaptive-qem';
   stages: number;
   commits: number;
   meanError: number;
@@ -99,6 +132,13 @@ export interface SimplifyReport {
   escalations: number;
   effectiveProfile?: ReductionProfile;
   healing: HealingSummary;
+  /** Extensões profissionais (rigbake parity). */
+  hausdorffApprox?: number;
+  components?: number;
+  componentFloorsHit?: number;
+  errorBudget?: number;
+  targetTooAggressive?: boolean;
+  safeTriangleSuggestion?: number;
 }
 
 export interface SimplifyResult {
@@ -110,6 +150,11 @@ export interface SimplifyResult {
   warnings: string[];
   stoppedSafely: boolean;
   elapsedMs: number;
+  /** Desvio por vértice (fração da diagonal) para heatmap verde→amarelo→vermelho. */
+  deviation?: Float32Array;
+  uvs?: Float32Array;
+  colors?: Float32Array;
+  materialIds?: Uint32Array;
   validation: {
     watertight: boolean;
     boundaryLoops: number;
@@ -145,7 +190,7 @@ export interface ImportTopology {
 }
 
 /** Versão do protocolo worker↔UI. UI rejeita respostas com protocolo diferente. */
-export const MESH_PROTOCOL = 6;
+export const MESH_PROTOCOL = 8;
 
 export interface ImportSuccess {
   type: 'complete';
@@ -173,6 +218,14 @@ export interface WorkerRequest {
   timeBudgetMs?: number;
   profile?: ReductionProfile;
   limits?: ReductionLimits;
+  targetMode?: TargetMode;
+  smartLevel?: SmartLevel;
+  errorBudget?: number;
+  minComponentTriangles?: number;
+  preserveUV?: boolean;
+  preserveMaterials?: boolean;
+  preserveColors?: boolean;
+  preserveSkinning?: boolean;
 }
 
 export type WorkerProgressPhase =
@@ -214,6 +267,10 @@ export interface WorkerSuccess {
   stl: BinaryStlResult;
   positions: Float32Array;
   indices: Uint32Array;
+  deviation?: Float32Array;
+  uvs?: Float32Array;
+  colors?: Float32Array;
+  materialIds?: Uint32Array;
   warnings: string[];
   validation: SimplifyResult['validation'];
   report: SimplifyReport;

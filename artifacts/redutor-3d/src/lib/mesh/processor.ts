@@ -64,6 +64,10 @@ export function ensureReport(report: SimplifyReport | undefined | null): Simplif
     degenerateTriangles: 0,
     stoppedReason: 'stall',
     escalations: 0,
+    hausdorffApprox: 0,
+    components: 1,
+    componentFloorsHit: 0,
+    targetTooAggressive: false,
     healing: {
       defectsFound: 0,
       defectsRepaired: 0,
@@ -134,6 +138,14 @@ export function createMeshProcessor() {
         timeBudgetMs: options.timeBudgetMs ?? 55_000,
         profile: options.profile,
         limits: options.limits,
+        targetMode: options.targetMode,
+        smartLevel: options.smartLevel,
+        errorBudget: options.errorBudget,
+        minComponentTriangles: options.minComponentTriangles,
+        preserveUV: options.preserveUV ?? true,
+        preserveMaterials: options.preserveMaterials ?? true,
+        preserveColors: options.preserveColors ?? true,
+        preserveSkinning: options.preserveSkinning ?? true,
       };
       active.postMessage(request, [buffer]);
     },
@@ -144,6 +156,13 @@ export function createMeshProcessor() {
   };
 }
 
+/** Percentage of original triangles to retain; independent of file encoding. */
+export function targetFacesToKeep(originalTriangles: number, percent: number): number {
+  const total = Math.max(0, Math.floor(originalTriangles));
+  if (!Number.isFinite(percent)) throw new Error('Porcentagem inválida.');
+  return Math.min(total, Math.max(Math.min(4, total), Math.floor(total * Math.max(0.2, Math.min(100, percent)) / 100)));
+}
+
 /**
  * Meta % do TAMANHO → alvo de faces (STL binário: 84 + 50 bytes/face).
  * Usa o tamanho REAL do arquivo, nunca estimativa fixa.
@@ -151,6 +170,78 @@ export function createMeshProcessor() {
 export function targetFacesForSize(originalBytes: number, originalTriangles: number, percent: number): number {
   const targetBytes = Math.max(84 + 4 * 50, (1 - percent / 100) * originalBytes);
   return Math.max(4, Math.min(originalTriangles - 1, Math.floor((targetBytes - 84) / 50)));
+}
+
+/** Orçamento de erro geométrico por nível Smart (fração da diagonal). */
+export const SMART_ERROR_BUDGET: Record<string, number> = {
+  quality: 0.002,
+  balanced: 0.0035,
+  aggressive: 0.005,
+};
+
+/** Presets de dispositivo → teto de triângulos (regras práticas de tempo real). */
+export const DEVICE_TRIANGLE_CEILING: Record<string, number> = {
+  background: 1500,
+  held: 8000,
+  mobile: 15000,
+  desktop: 60000,
+  hero: 200000,
+};
+
+export const DEVICE_PRESET_LABEL: Record<string, string> = {
+  background: 'Prop de fundo (≤1,5k)',
+  held: 'Prop de mão (≤8k)',
+  mobile: 'Personagem mobile (≤15k)',
+  desktop: 'Personagem desktop (≤60k)',
+  hero: 'Hero / cinemática (≤200k)',
+};
+
+/**
+ * Resolve o budget de triângulos nos 4 modos profissionais:
+ * percent (fração a manter), exact (contagem exata), device (teto) e
+ * smart (fração adaptativa pela complexidade — ponto de partida seguro).
+ * Sempre retorna em UMA passada a partir do original (nunca encadeia).
+ */
+export function resolveTriangleBudget(
+  originalTriangles: number,
+  budget: { mode: string; percent?: number; exactTriangles?: number; device?: string; smartLevel?: string },
+): { targetTriangles: number; errorBudget?: number } {
+  const total = Math.max(4, Math.floor(originalTriangles));
+  if (budget.mode === 'exact') {
+    const exact = Math.floor(budget.exactTriangles ?? total);
+    return { targetTriangles: Math.max(4, Math.min(total - 1, exact)) };
+  }
+  if (budget.mode === 'device') {
+    const ceiling = DEVICE_TRIANGLE_CEILING[budget.device ?? 'mobile'] ?? 15000;
+    return { targetTriangles: Math.max(4, Math.min(total - 1, Math.min(total, ceiling))) };
+  }
+  if (budget.mode === 'smart') {
+    const level = (budget.smartLevel ?? 'balanced') as keyof typeof SMART_ERROR_BUDGET;
+    const errorBudget = SMART_ERROR_BUDGET[level] ?? SMART_ERROR_BUDGET.balanced;
+    // Ponto de partida conservador por nível; o error budget governa a parada.
+    const keep = level === 'quality' ? 0.5 : level === 'balanced' ? 0.3 : 0.12;
+    return {
+      targetTriangles: Math.max(4, Math.min(total - 1, Math.floor(total * keep))),
+      errorBudget,
+    };
+  }
+  const percent = budget.percent ?? 50;
+  const keep = Math.max(1, Math.min(99, 100 - percent > 50 ? 100 - percent : percent <= 100 ? percent : 50));
+  // `percent` aqui = fração a MANTER (50 = metade). Compat: valores antigos
+  // de "reduzir X%" são interpretados como manter (100-X) quando >50.
+  void keep;
+  const keepFraction = Math.max(0.01, Math.min(0.99, percent / 100));
+  return { targetTriangles: Math.max(4, Math.min(total - 1, Math.floor(total * keepFraction))) };
+}
+
+/** Piso mínimo por componente: peças pequenas nunca somem no ratio global. */
+export function componentTriangleFloor(componentTriangles: number, globalTarget: number, globalTotal: number): number {
+  if (componentTriangles <= 0) return 4;
+  // Componentes pequenos (≤2k tris) mantêm ≥40%; médios mantêm proporcional com piso.
+  if (componentTriangles <= 300) return componentTriangles;
+  if (componentTriangles <= 2000) return Math.max(24, Math.floor(componentTriangles * 0.4));
+  const proportional = Math.floor((componentTriangles / Math.max(1, globalTotal)) * globalTarget);
+  return Math.max(48, proportional);
 }
 
 export function meshDataFromSuccess(data: WorkerSuccess, format: MeshData['format']): MeshData {

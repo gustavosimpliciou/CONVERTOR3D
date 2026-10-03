@@ -19,7 +19,7 @@
  * smoothing, quantização, float32→float16, arredondamento, snap, merge.
  */
 
-import { calculateBounds, normalizeTriangles } from '../mesh/geometry';
+import { calculateBounds, meshFromTriangleCoordinates } from '../mesh/geometry';
 import type { MeshData } from '../mesh/types';
 
 const decoder = new TextDecoder();
@@ -41,8 +41,6 @@ export function readBinaryStlMesh(bytes: Uint8Array): ParsedStl {
   if (faces === 0 || 84 + faces * 50 !== bytes.length) {
     throw new Error('STL binário com contagem inconsistente.');
   }
-  const positions: number[] = [];
-  const triangles: number[][] = [];
   const coords = new Float32Array(faces * 9);
   const normals = new Float32Array(faces * 3);
   for (let t = 0; t < faces; t += 1) {
@@ -52,21 +50,15 @@ export function readBinaryStlMesh(bytes: Uint8Array): ParsedStl {
       if (!Number.isFinite(n)) throw new Error('Normal inválida no STL.');
       normals[t * 3 + c] = n;
     }
-    const tri: number[] = [];
     for (let v = 0; v < 3; v += 1) {
       for (let c = 0; c < 3; c += 1) {
         const value = view.getFloat32(base + 12 + v * 12 + c * 4, true);
         if (!Number.isFinite(value)) throw new Error('Coordenada inválida no STL.');
         coords[t * 9 + v * 3 + c] = value;
       }
-      positions.push(
-        coords[t * 9 + v * 3], coords[t * 9 + v * 3 + 1], coords[t * 9 + v * 3 + 2],
-      );
-      tri.push(positions.length / 3 - 1);
     }
-    triangles.push(tri);
   }
-  const mesh = normalizeTriangles(positions, triangles, 'STL');
+  const mesh = meshFromTriangleCoordinates(coords);
   return { mesh, faces, coords, normals };
 }
 
@@ -87,9 +79,7 @@ export function parseAsciiStlMesh(text: string): ParsedStl {
   }
   const coords = new Float32Array(verts);
   const normals32 = new Float32Array(normals.slice(0, faces * 3));
-  const triangles: number[][] = [];
-  for (let t = 0; t < faces; t += 1) triangles.push([t * 3, t * 3 + 1, t * 3 + 2]);
-  const mesh = normalizeTriangles(Array.from(coords), triangles, 'STL');
+  const mesh = meshFromTriangleCoordinates(coords);
   return { mesh, faces, coords, normals: normals32 };
 }
 

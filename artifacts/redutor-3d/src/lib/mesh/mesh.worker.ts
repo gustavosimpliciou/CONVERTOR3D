@@ -2,6 +2,7 @@ import { buildStats } from './geometry';
 import { auditMesh, auditWithinTolerance } from './validation';
 import { parseMesh } from './parser';
 import { simplifyMesh } from './simplifier';
+import { reduceStlQuality } from './quality-reducer';
 import { exportBinaryStl } from './stl';
 import { NotStlError, parseStlForImport } from './stl-import';
 import type {
@@ -74,7 +75,7 @@ async function handleImport(request: ImportRequest): Promise<void> {
       nonManifoldEdges: imported.audit.nonManifoldEdges,
       components: imported.audit.components,
       degenerateTriangles: imported.audit.degenerateTriangles,
-      watertight: imported.audit.boundaryLoops === 0,
+      watertight: imported.audit.boundaryLoops === 0 && imported.audit.nonManifoldEdges === 0 && imported.audit.orientationConflicts === 0,
       volume: imported.audit.volume,
     },
     quirks: imported.quirks,
@@ -85,7 +86,7 @@ async function handleImport(request: ImportRequest): Promise<void> {
   });
 }
 
-self.onmessage = (event: MessageEvent<ImportRequest | WorkerRequest>) => {
+self.onmessage = async (event: MessageEvent<ImportRequest | WorkerRequest>) => {
   if (event.data.type === 'import') {
     handleImport(event.data).catch((error: unknown) => {
       const failure: WorkerFailure = {
@@ -109,7 +110,9 @@ self.onmessage = (event: MessageEvent<ImportRequest | WorkerRequest>) => {
       message: 'Lendo a estrutura do arquivo…', stage: 'ANALISANDO',
       targetTriangles: request.targetTriangles, elapsedMs: elapsed(),
     });
-    const mesh = parseMesh(request.buffer, request.fileName);
+    const mesh = request.fileName.toLowerCase().endsWith('.stl')
+      ? parseStlForImport(new Uint8Array(request.buffer), request.fileName).mesh
+      : parseMesh(request.buffer, request.fileName);
     const original = buildStats(mesh);
     const originalBytes = request.buffer.byteLength;
 
@@ -131,7 +134,8 @@ self.onmessage = (event: MessageEvent<ImportRequest | WorkerRequest>) => {
     });
 
     // 2. FEATURE LOCK → DECIMAÇÃO ADAPTATIVA PROGRESSIVA (estágios + rollback)
-    const result = simplifyMesh(mesh, {
+    const reducer = mesh.format === 'STL' ? reduceStlQuality : simplifyMesh;
+    const result = await reducer(mesh, {
       targetTriangles: request.targetTriangles,
       quality: request.quality,
       preserveBorders: request.preserveBorders,
@@ -140,6 +144,9 @@ self.onmessage = (event: MessageEvent<ImportRequest | WorkerRequest>) => {
       timeBudgetMs: request.timeBudgetMs ?? 55_000,
       profile: request.profile,
       limits: request.limits,
+      targetMode: request.targetMode,
+      errorBudget: request.errorBudget,
+      minComponentTriangles: request.minComponentTriangles,
       onCheckpoint: (activeTriangles) => {
         const done = 1 - (activeTriangles - request.targetTriangles) / Math.max(1, original.triangles - request.targetTriangles);
         const reduction = ((original.triangles - activeTriangles) / Math.max(1, original.triangles)) * 100;
@@ -182,14 +189,14 @@ self.onmessage = (event: MessageEvent<ImportRequest | WorkerRequest>) => {
     const referenceAudit = auditMesh(mesh);
     const finalAudit = auditMesh(reducedMesh, referenceAudit);
     const madeProgress = reduced.triangles < original.triangles;
-    if ((!finalAudit.valid || !auditWithinTolerance(finalAudit, referenceAudit)) && !madeProgress) {
+    if (!result.validation.qualityAccepted || !finalAudit.valid || !auditWithinTolerance(finalAudit, referenceAudit)) {
       throw new Error(`A malha reduzida não passou na validação final: ${finalAudit.reasons.join(' ') || 'tolerância geométrica excedida.'}`);
     }
     if (!madeProgress) {
       // Upload continua válido: o MODELO está carregado, só a redução não
       // avançou. A UI mostra isso como aviso (não como "não pôde ser lido").
       const error = new Error(
-        'Nenhuma redução segura foi possível para este modelo com os limites atuais — o original foi preservado intacto. Tente o perfil Máximo ou a aba Sem alterar malha.',
+        'Nenhuma redução segura foi possível para este modelo com os limites atuais — o original foi preservado intacto. Você pode manter o original ou usar a aba Sem alterar malha.',
       ) as Error & { code?: string };
       error.code = 'ZERO_REDUCTION';
       throw error;
@@ -214,7 +221,7 @@ self.onmessage = (event: MessageEvent<ImportRequest | WorkerRequest>) => {
     if (reimported.indices.length / 3 !== reduced.triangles) {
       throw new Error('O STL exportado não contém as faces esperadas após reimportação.');
     }
-    if (reimportedAudit.boundaryLoops > referenceAudit.boundaryLoops || reimportedAudit.nonManifoldEdges > referenceAudit.nonManifoldEdges) {
+    if (!reimportedAudit.valid || !auditWithinTolerance(reimportedAudit, referenceAudit)) {
       throw new Error('O STL exportado perdeu integridade topológica na reimportação.');
     }
     post({

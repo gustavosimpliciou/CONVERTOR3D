@@ -1,7 +1,7 @@
 import { Mesh, Object3D, Vector3 } from 'three';
 import { ColladaLoader } from 'three/examples/jsm/loaders/ColladaLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
-import { buildStats, calculateBounds, normalizeTriangles } from './geometry';
+import { buildStats, calculateBounds, normalizeTriangles, meshFromTriangleCoordinates } from './geometry';
 import type { MeshData, MeshFormat } from './types';
 
 const decoder = new TextDecoder();
@@ -51,11 +51,9 @@ function parseBinaryStl(buffer: ArrayBuffer): MeshData | null {
     const base = 84 + i * 50;
     indices.push(readVertex(base + 12), readVertex(base + 24), readVertex(base + 36));
   }
-  const mesh = normalizeTriangles(
-    positions,
-    Array.from({ length: indices.length / 3 }, (_, i) => indices.slice(i * 3, i * 3 + 3)),
-    'STL',
-  );
+  // STL import must not weld distinct nearby points or remove tiny valid facets.
+  const typedPositions = new Float32Array(positions);
+  const mesh: MeshData = { positions: typedPositions, indices: new Uint32Array(indices), format: 'STL', bounds: calculateBounds(typedPositions) };
   return buildStats(mesh).triangles > 0 ? mesh : null;
 }
 
@@ -69,12 +67,7 @@ function parseAsciiStl(text: string): MeshData | null {
     vertices.push(...values);
   }
   if (vertices.length < 9 || vertices.length % 9 !== 0) return null;
-  const triangles = Array.from({ length: vertices.length / 9 }, (_, triangle) => [
-    triangle * 3,
-    triangle * 3 + 1,
-    triangle * 3 + 2,
-  ]);
-  return normalizeTriangles(vertices, triangles, 'STL');
+  return meshFromTriangleCoordinates(new Float32Array(vertices));
 }
 
 function parseObj(text: string): MeshData {

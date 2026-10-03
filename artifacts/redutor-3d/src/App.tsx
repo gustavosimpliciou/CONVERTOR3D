@@ -25,7 +25,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import NotFound from '@/pages/not-found';
 import { Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
 import { buildStats } from './lib/mesh/geometry';
-import { checkProtocol, createMeshProcessor, downloadStl, ensureReport, importTimeoutMs, isZeroReductionError, STALE_WORKER_MESSAGE, targetFacesForSize } from './lib/mesh/processor';
+import { checkProtocol, createMeshProcessor, downloadStl, ensureReport, importTimeoutMs, isZeroReductionError, STALE_WORKER_MESSAGE, targetFacesToKeep } from './lib/mesh/processor';
 import { createCompressor, downloadBytes } from './lib/compress/processor';
 import { packGzip } from './lib/compress/container';
 import type { MeshData, MeshStats, Quality, WorkerSuccess } from './lib/mesh/types';
@@ -494,13 +494,6 @@ type ReducedResult = {
   warnings: string[];
 };
 
-const PROFILE_LABELS: Record<ReductionProfile, { title: string; caption: string }> = {
-  quality: { title: 'Qualidade', caption: 'fidelidade máxima' },
-  balanced: { title: 'Balanceado', caption: '~50% menor' },
-  aggressive: { title: 'Agressivo', caption: '60–70% + vigiado' },
-  maximum: { title: 'Máximo', caption: 'menor possível' },
-};
-
 const PROFILE_QUALITY: Record<ReductionProfile, Quality> = {
   quality: 'ultra',
   balanced: 'high',
@@ -524,7 +517,7 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
   const [phase, setPhase] = useState<ReducePhase>('empty');
   const [model, setModel] = useState<MeshMeta>();
   const [targetPercent, setTargetPercent] = useState<number>(50);
-  const [profile, setProfile] = useState<ReductionProfile>('balanced');
+  const profile: ReductionProfile = 'quality';
   const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState('preparando modelo');
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -609,7 +602,7 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
     const file = fileRef.current;
     if (!file || !model) return;
     try {
-      const targetFaces = targetFacesForSize(file.size, model.stats.triangles, targetPercent);
+      const targetFaces = targetFacesToKeep(model.stats.triangles, targetPercent);
       procRef.current?.cancel();
       const proc = createMeshProcessor();
       procRef.current = proc;
@@ -621,6 +614,7 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
         targetTriangles: targetFaces, quality: PROFILE_QUALITY[profile],
         preserveBorders: true, preserveSilhouette: true, protectDetails: true,
         profile, timeBudgetMs: Math.round(budget),
+        limits: { maxMeanError: 0.00025, maxMaxError: 0.0005, maxVolumeError: 0.5 },
       }, (event) => {
         if (event.type === 'progress') {
           setProgress(Math.round(event.data.progress * 100));
@@ -645,7 +639,7 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
           // Falha de OTIMIZAÇÃO ≠ falha de upload: o modelo continua
           // carregado; o aviso explica e sugere alternativas.
           if (isZeroReductionError(event.data)) {
-            setNotice(`${event.data.message} Tente o perfil Máximo ou a aba Sem alterar malha.`);
+            setNotice(event.data.message);
             setPhase('ready'); setProgress(0);
           } else {
             setError(event.data.message); setPhase('error'); setProgress(0);
@@ -683,14 +677,14 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
 
   useEffect(() => () => { procRef.current?.cancel(); }, []);
 
-  const targetFaces = model && fileRef.current ? targetFacesForSize(fileRef.current.size, model.stats.triangles, targetPercent) : 0;
+  const targetFaces = model && fileRef.current ? targetFacesToKeep(model.stats.triangles, targetPercent) : 0;
   const canReduce = !!model && targetFaces < model.stats.triangles;
 
   return <div className="app-shell dark">
     <Header hasModel={phase !== 'empty' && phase !== 'error'} onImport={() => inputRef.current?.click()} onReset={reset} mode="compress" onMode={onModeChange} title="COMPRESSÃO" />
     <div className="px-5 pt-3 md:hidden"><ModeTabs mode="compress" onMode={onModeChange} /></div>
     {phase === 'empty' && <main className="relative mx-auto flex min-h-[calc(100dvh-66px)] max-w-[1320px] flex-col justify-center px-5 py-12 md:px-10">
-      <div className="mb-8 flex items-end justify-between animate-in"><div><div className="eyebrow mb-3 text-orange-400/80">01 / entrada · redução inteligente</div><h1 className="max-w-xl text-3xl font-medium tracking-[-.04em] text-stone-100 md:text-5xl">Metade do tamanho.<br /><span className="text-stone-500">A mesma peça.</span></h1></div><div className="hidden max-w-[210px] text-right text-xs leading-5 text-stone-600 md:block">Áreas simples financiam a redução. Features ficam protegidas.</div></div>
+      <div className="mb-8 flex items-end justify-between animate-in"><div><div className="eyebrow mb-3 text-orange-400/80">01 / entrada · redução inteligente</div><h1 className="max-w-xl text-3xl font-medium tracking-[-.04em] text-stone-100 md:text-5xl">Menos faces.<br /><span className="text-stone-500">Qualidade protegida.</span></h1></div><div className="hidden max-w-[210px] text-right text-xs leading-5 text-stone-600 md:block">Áreas simples financiam a redução. Features ficam protegidas.</div></div>
       <div className="animate-in-delay"><Dropzone onFiles={handleFiles} inputRef={inputRef} accept=".stl,model/stl" formatsLabel="STL BINÁRIO · STL ASCII" /></div>
       <div className="mt-6 grid grid-cols-1 gap-px border border-white/[.06] bg-white/[.06] sm:grid-cols-3 animate-in-delay">{[{ icon: ScanLine, title: 'Mapa de importância', copy: 'Cada região recebe um peso geométrico.' }, { icon: ShieldCheck, title: 'Features protegidas', copy: 'Olhos, dedos e relevos sob lock.' }, { icon: FileBox, title: 'STL pronto', copy: 'Saída válida para o slicer.' }].map(({ icon: Icon, title, copy }) => <div key={title} className="bg-stone-950/75 p-4"><Icon size={15} className="mb-3 text-orange-400" /><div className="text-xs font-medium">{title}</div><div className="mt-1 text-[11px] text-stone-600">{copy}</div></div>)}</div>
     </main>}
@@ -717,23 +711,28 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
           {quirks.length > 0 && <div className="mt-3 border-t border-white/[.06] pt-3">{quirks.map((quirk) => <div key={quirk} className="mb-1 text-[11px] leading-5 text-stone-500">· {quirk}</div>)}</div>}
         </section>
         <section className="panel flex flex-col gap-4 p-4" aria-label="Meta e perfil">
-          <MetaSelect target={targetPercent} onChange={setTargetPercent} />
-          <div><div className="mb-2 text-xs text-stone-400">Perfil de qualidade</div><div className="grid grid-cols-2 gap-1">{(Object.keys(PROFILE_LABELS) as ReductionProfile[]).map((option) => <button key={option} className={`border px-2 py-2 text-left transition ${profile === option ? 'border-orange-400/60 bg-orange-500/10 text-orange-300' : 'border-white/[.07] bg-black/10 text-stone-500 hover:border-white/20'}`} onClick={() => setProfile(option)} data-testid={`button-profile-${option}`}><span className="block text-[11px]">{PROFILE_LABELS[option].title}</span><span className="mono text-[9px] text-stone-600">{PROFILE_LABELS[option].caption}</span></button>)}</div></div>
-          {!canReduce && <div className="border border-orange-400/20 bg-orange-500/[.06] px-3 py-2 text-xs text-orange-200">A meta não exige redução para este arquivo. Aumente a meta para continuar.</div>}
-          <button className="button-primary flex h-10 items-center justify-center gap-2 text-xs font-semibold disabled:opacity-40" onClick={() => void runReduce()} disabled={!canReduce} data-testid="button-reduce"><Zap size={14} /> Comprimir {targetPercent}%</button>
+          <div>
+            <label htmlFor="keep-percent" className="mb-3 flex items-center justify-between text-xs text-stone-300"><span>Faces a manter</span><span className="mono text-orange-300">{targetPercent.toFixed(1)}%</span></label>
+            <input id="keep-percent" type="range" min="0.2" max="100" step="0.1" value={targetPercent} onChange={(event) => setTargetPercent(Number(event.target.value))} className="w-full accent-orange-400" data-testid="input-keep-percent" />
+            <div className="mt-2 flex justify-between text-[10px] text-stone-500"><span>Menos faces</span><span>Mais faces</span></div>
+            <p className="mt-3 text-[11px] leading-5 text-stone-400">A porcentagem é uma meta. A redução para antes se ultrapassar os limites de qualidade.</p>
+          </div>
+          <div className="border border-emerald-400/20 bg-emerald-500/[.05] p-3 text-[11px] leading-5 text-emerald-200">Qualidade protegida: bordas, componentes e orientação verificados. Desvio máximo amostrado limitado a 0,05% da diagonal; volume a 0,5%. Os limites não são relaxados para atingir a meta.</div>
+          {!canReduce && <div className="border border-orange-400/20 bg-orange-500/[.06] px-3 py-2 text-xs text-orange-200">100% mantém o original. Diminua a porcentagem para solicitar redução.</div>}
+          <button className="button-primary flex h-10 items-center justify-center gap-2 text-xs font-semibold disabled:opacity-40" onClick={() => void runReduce()} disabled={!canReduce} data-testid="button-reduce"><Zap size={14} /> Reduzir mantendo {targetPercent.toFixed(1)}%</button>
           <p className="text-[10px] leading-4 text-stone-600">Redução adaptativa: áreas simples pagam a conta, features ficam protegidas. O original nunca é alterado.</p>
         </section>
       </div>
     </main>}
     {phase === 'done' && model && reduced && (() => {
       const achieved = (1 - reduced.stl.byteLength / model.bytes) * 100;
-      const metaOk = achieved >= targetPercent;
+      const metaOk = reduced.stats.triangles <= targetFaces;
       const silOk = reduced.report.silhouetteError <= PROFILE_SIL_LIMIT[profile];
       const valid = reduced.validation.qualityAccepted && reduced.validation.boundaryLoops <= reduced.report.boundaryOriginal && reduced.validation.nonManifoldEdges === 0;
       const fidelity = profile === 'quality' ? 'FIDELIDADE MÁXIMA' : profile === 'balanced' ? 'ALTA FIDELIDADE' : 'FIDELIDADE CONTROLADA';
       return <main className="relative mx-auto max-w-[1480px] px-4 py-5 md:px-7 lg:px-10">
       <div className="mb-5"><div className="eyebrow mb-2 text-orange-400/80">03 / resultado · {reduced.report.stoppedReason === 'target' ? 'meta atingida' : 'redução máxima segura'}</div><h1 className="text-2xl font-medium tracking-[-.035em] md:text-3xl">Compressão 3D concluída.</h1></div>
-      {(reduced.report.stoppedReason === 'quality' || reduced.report.stoppedReason === 'stall') && <div className="mb-4 border border-orange-400/20 bg-orange-500/[.06] px-3 py-2 text-xs text-orange-200">Redução máxima segura atingida: parar aqui preserva a identidade do modelo. {reduced.report.escalations > 0 ? `O sistema redistribuiu a redução ${reduced.report.escalations}x para áreas simples.` : ''}</div>}
+      {(reduced.report.stoppedReason === 'quality' || reduced.report.stoppedReason === 'stall' || reduced.report.stoppedReason === 'time') && <div className="mb-4 border border-orange-400/20 bg-orange-500/[.06] px-3 py-2 text-xs text-orange-200">Processamento encerrado dentro dos limites verificados. A meta pode não ter sido atingida. {reduced.report.escalations > 0 ? `O sistema redistribuiu a redução ${reduced.report.escalations}x para áreas simples.` : ''}</div>}
       {reduced.warnings.length > 0 && <div className="mb-4 border border-white/[.08] bg-black/20 px-3 py-2 text-xs text-stone-400">{reduced.warnings.slice(0, 3).map((warning) => <div key={warning}>{warning}</div>)}</div>}
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="min-w-0">
@@ -744,15 +743,18 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
           </div>
           <section className="panel mt-4 p-4" aria-label="Relatório de qualidade">
             <div className="mb-2 flex items-center gap-2"><ScanLine size={15} className="text-orange-400" /><span className="text-sm font-medium">Relatório de qualidade</span></div>
-            <MetaLine label="Redução de tamanho" value={`${achieved.toFixed(1)}% (meta ${targetPercent}%: ${metaOk ? 'SUCESSO' : 'SUCESSO PARCIAL'})`} accent />
+            <MetaLine label="Redução de tamanho" value={`${achieved.toFixed(1)}%`} accent />
             <MetaLine label="Redução de faces" value={`${formatCount(model.stats.triangles)} → ${formatCount(reduced.stats.triangles)}`} />
-            <MetaLine label="Erro geométrico médio" value={`${(reduced.report.meanError * 100).toFixed(3)}%`} />
-            <MetaLine label="Erro geométrico máximo" value={`${(reduced.report.maxError * 100).toFixed(3)}%`} />
-            <MetaLine label="Erro RMS" value={`${((reduced.report.rmsError ?? 0) * 100).toFixed(3)}%`} />
-            <MetaLine label="Reconstrução" value={(() => { const h = reduced.report.healing; if (!h || h.defectsFound === 0) return 'sem defeitos'; return `${h.defectsRepaired} corrigidos · ${h.facesAdded} faces`; })()} accent />
+            <MetaLine label="Faces mantidas" value={`${(reduced.stats.triangles / model.stats.triangles * 100).toFixed(1)}% (meta ${targetPercent}%: ${metaOk ? 'atingida' : 'parada pelos limites'})`} />
+            <MetaLine label="Desvio médio amostrado" value={`${(reduced.report.meanError * 100).toFixed(3)}%`} />
+            <MetaLine label="Desvio máximo amostrado" value={`${(reduced.report.maxError * 100).toFixed(3)}%`} />
+            {reduced.report.engine !== 'meshoptimizer' && <MetaLine label="Erro RMS" value={`${((reduced.report.rmsError ?? 0) * 100).toFixed(3)}%`} />}
+            <MetaLine label="Reconstrução" value={(() => { const h = reduced.report.healing; if (!h || h.defectsFound === 0) return 'nenhum reparo executado'; return `${h.defectsRepaired} corrigidos · ${h.facesAdded} faces`; })()} accent />
+            {reduced.report.engine !== 'meshoptimizer' && <>
             <MetaLine label="Erro de silhueta" value={`${(reduced.report.silhouetteError * 100).toFixed(2)}% ${silOk ? '· PASS' : '· REVISAR'}`} />
             <MetaLine label="Erro de normal" value={reduced.report.normalError.toFixed(4)} />
             <MetaLine label="Erro de curvatura" value={reduced.report.curvatureError.toFixed(4)} />
+            </>}
             <MetaLine label="Alteração de volume" value={`${reduced.report.volumeDeltaPercent.toFixed(2)}%`} />
             <MetaLine label="Buracos novos" value={reduced.report.boundaryFinal <= reduced.report.boundaryOriginal ? '0' : `${reduced.report.boundaryFinal - reduced.report.boundaryOriginal}`} />
             <MetaLine label="Non-manifold" value={`${reduced.report.nonManifoldEdges}`} />
@@ -771,8 +773,8 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
           <MetaLine label="Malha" value={reduced.report.boundaryFinal <= 0 ? 'VÁLIDA' : 'VÁLIDA / bordas originais'} accent />
           <MetaLine label="Watertight" value={reduced.validation.watertight ? 'PASS' : '—'} accent />
           <MetaLine label="Validação" value={valid ? '✓ PASS' : 'REVISAR'} accent />
-          <button className="button-primary mt-2 flex h-10 items-center justify-center gap-2 text-xs font-semibold" onClick={() => downloadStl(reduced.stl, model.name)} data-testid="button-download-stl"><Download size={14} /> Baixar STL comprimido</button>
-          <button className="button-secondary flex h-10 items-center justify-center gap-2 text-xs" onClick={downloadGzip} disabled={gzBusy} data-testid="button-download-gzip"><Download size={14} /> {gzBusy ? 'Gerando .gz…' : 'Baixar .gz (arquivo)'}</button>
+          <button className="button-primary mt-2 flex h-10 items-center justify-center gap-2 text-xs font-semibold" onClick={() => downloadStl(reduced.stl, model.name)} disabled={!valid} data-testid="button-download-stl"><Download size={14} /> Baixar STL comprimido</button>
+          <button className="button-secondary flex h-10 items-center justify-center gap-2 text-xs" onClick={downloadGzip} disabled={gzBusy || !valid} data-testid="button-download-gzip"><Download size={14} /> {gzBusy ? 'Gerando .gz…' : 'Baixar .gz (arquivo)'}</button>
           <button className="flex h-9 items-center justify-center gap-2 text-xs text-stone-500 transition hover:text-orange-300" onClick={reset}><X size={14} /> Novo arquivo</button>
         </section>
       </div>

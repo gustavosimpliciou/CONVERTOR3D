@@ -379,7 +379,8 @@ export function approximateSurfaceError(
         }
       }
     }
-    if (best === Infinity) best = 0; // fora da grade por tolerância numérica
+    // Missing candidates must fail validation, never become zero error.
+    if (best === Infinity) return { mean: Infinity, max: Infinity };
     const dist = Math.sqrt(best) / diagonal;
     sum += dist;
     if (dist > max) max = dist;

@@ -72,7 +72,7 @@ export function buildStats(mesh: MeshData): MeshStats {
       a === b ||
       b === c ||
       a === c ||
-      triangleAreaSquared(mesh.positions, mesh.indices, i / 3) <= EPSILON
+      triangleAreaSquared(mesh.positions, mesh.indices, i / 3) <= 0
     ) {
       degenerateTriangles += 1;
     }
@@ -223,4 +223,21 @@ export function normalizeTriangles(
     valid.push(a, b, c);
   }
   return compactMesh(positions, valid, format);
+}
+
+/** Exact coordinate welding for STL: retains all faces, including tiny valid facets. */
+export function meshFromTriangleCoordinates(coords: Float32Array): MeshData {
+  const vertices: number[] = [];
+  const indices = new Uint32Array(coords.length / 3);
+  const exact = new Map<string, number>();
+  for (let offset = 0; offset < coords.length; offset += 3) {
+    const x = coords[offset], y = coords[offset + 1], z = coords[offset + 2];
+    if (![x, y, z].every(Number.isFinite)) throw new Error('Coordenada inválida no STL.');
+    const key = `${x}|${y}|${z}`;
+    let index = exact.get(key);
+    if (index === undefined) { index = vertices.length / 3; vertices.push(x, y, z); exact.set(key, index); }
+    indices[offset / 3] = index;
+  }
+  const positions = new Float32Array(vertices);
+  return { positions, indices, format: 'STL', bounds: calculateBounds(positions) };
 }

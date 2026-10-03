@@ -31,6 +31,7 @@ import { compactMesh } from './geometry';
 import { auditMesh, auditWithinTolerance } from './validation';
 import { computeComplexityMap, importanceMultiplier, RegionClass, edgeKeyOf } from './complexity';
 import {
+  approximateSurfaceError,
   boundaryCollapseAllowed,
   buildTriangleGrid,
   directedSamplesError,
@@ -197,6 +198,13 @@ function paramsFor(options: SimplifyOptions): EngineParams {
   if (limits.maxCurvatureError !== undefined) base.curvatureMax = limits.maxCurvatureError;
   if (limits.maxSilhouetteError !== undefined) base.silhouetteMax = limits.maxSilhouetteError;
   if (limits.maxDriftNormal !== undefined) base.driftN = limits.maxDriftNormal;
+  // Smart error budget (fração da diagonal): governa a parada por qualidade.
+  if (options.errorBudget !== undefined && Number.isFinite(options.errorBudget)) {
+    const budget = Math.max(0.0005, Math.min(0.02, options.errorBudget));
+    base.floorMean = budget;
+    base.floorMax = budget * 8;
+    if (Number.isFinite(base.silhouetteMax)) base.silhouetteMax = Math.max(base.silhouetteMax, budget * 10);
+  }
   return base;
 }
 
@@ -229,7 +237,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
   const timeBudget = options.timeBudgetMs ?? 55_000;
   const deadline = startedAt + timeBudget;
   const originalTriangles = mesh.indices.length / 3;
-  const target = Math.max(4, Math.floor(options.targetTriangles));
+  let target = Math.max(4, Math.floor(options.targetTriangles));
   const referenceAudit = auditMesh(mesh);
   let P = paramsFor(options);
   /** Perfil efetivo (sobe na cascata quando o estágio trava). */
@@ -245,25 +253,93 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
   let escalations = 0;
   let stagesCompleted = 0;
   let commits = 0;
+  // --- Camada profissional: componentes + error budget + qualidade primeiro.
+  let componentCount = referenceAudit.components || 1;
+  let componentFloorsHit = 0;
+  let targetTooAggressive = false;
+  let safeTriangleSuggestion = target;
+  const warningsEarly: string[] = [];
+  // Contagem de componentes por union-find (uma passada sobre os triângulos).
+  try {
+    const vCountEarly = mesh.positions.length / 3;
+    const parent = new Int32Array(vCountEarly);
+    for (let i = 0; i < vCountEarly; i += 1) parent[i] = i;
+    const find = (x: number): number => {
+      let r = x;
+      while (parent[r] !== r) r = parent[r];
+      while (parent[x] !== r) { const n = parent[x]; parent[x] = r; x = n; }
+      return r;
+    };
+    const union = (a: number, b: number): void => {
+      const ra = find(a); const rb = find(b);
+      if (ra !== rb) parent[rb] = ra;
+    };
+    for (let t = 0; t < originalTriangles; t += 1) {
+      const a = mesh.indices[t * 3]; const b = mesh.indices[t * 3 + 1]; const c = mesh.indices[t * 3 + 2];
+      union(a, b); union(b, c);
+    }
+    const compTris = new Map<number, number>();
+    for (let t = 0; t < originalTriangles; t += 1) {
+      const r = find(mesh.indices[t * 3]);
+      compTris.set(r, (compTris.get(r) ?? 0) + 1);
+    }
+    componentCount = compTris.size || 1;
+    let floorsSum = 0;
+    for (const tris of compTris.values()) {
+      let floor: number;
+      if (tris <= 300) floor = tris;
+      else if (tris <= 2000) floor = Math.max(24, Math.floor(tris * 0.4));
+      else floor = Math.max(48, Math.floor((tris / Math.max(1, originalTriangles)) * target));
+      if (options.minComponentTriangles !== undefined) floor = Math.max(floor, Math.min(tris, options.minComponentTriangles));
+      floorsSum += floor;
+      if (floor >= tris * 0.35 && tris <= 2000) componentFloorsHit += 1;
+    }
+    if (floorsSum > target) {
+      targetTooAggressive = true;
+      safeTriangleSuggestion = Math.min(originalTriangles - 1, floorsSum);
+      warningsEarly.push(
+        `Alvo agressivo demais para ${componentCount} componente(s): piso mínimo soma ${floorsSum.toLocaleString('pt-BR')} faces. ` +
+        `Ajustado para o menor valor seguro — prefira um resultado um pouco mais pesado e fiel.`,
+      );
+      target = safeTriangleSuggestion;
+    } else {
+      safeTriangleSuggestion = target;
+    }
+  } catch { componentCount = referenceAudit.components || 1; }
 
   const finishWith = (
     positions: Float32Array,
     indices: Uint32Array,
     warnings: string[],
     stoppedSafely: boolean,
+    deviation?: Float32Array,
+    extra?: { uvs?: Float32Array; colors?: Float32Array; materialIds?: Uint32Array },
   ): SimplifyResult => {
     const outTriangles = indices.length / 3;
     // Auditoria RELATIVA à referência: defeitos pré-existentes (ex. winding
     // misto no arquivo de origem) não invalidam uma redução que não criou
     // nenhum defeito novo. Vale FINAL <= ORIGINAL.
-    const finalAudit = auditMesh({ positions, indices, format: mesh.format, bounds: mesh.bounds }, referenceAudit);
-    const safe = finalAudit.valid && auditWithinTolerance(finalAudit, referenceAudit);
+    // REGRA CONTRA BURACOS + DEFORMAÇÃO: buracos novos ou bbox absurda = inválido.
+    const candidateAudit = auditMesh({ positions, indices, format: mesh.format, bounds: mesh.bounds }, referenceAudit);
+    const holesNew = candidateAudit.boundaryLoops - referenceAudit.boundaryLoops;
+    const bboxShift = Math.max(
+      ...candidateAudit.bounds.min.map((v, i) => Math.abs(v - referenceAudit.bounds.min[i])),
+      ...candidateAudit.bounds.max.map((v, i) => Math.abs(v - referenceAudit.bounds.max[i])),
+    ) / Math.max(...referenceAudit.bounds.size, 1e-9);
+    const holesInvalid = holesNew > 0;
+    const bboxInvalid = bboxShift > 0.05;
+    const finalAudit = holesInvalid || bboxInvalid ? { ...candidateAudit, valid: false, reasons: [...candidateAudit.reasons, holesInvalid ? `Buracos novos detectados (+${holesNew}); rollback para o melhor estado seguro.` : `Deformação de bbox(${(bboxShift * 100).toFixed(2)}%) excede 5%; rollback.`] } : candidateAudit;
+    const safe = finalAudit.valid && auditWithinTolerance(finalAudit, referenceAudit) &&
+      lastMetrics.mean <= P.floorMean && lastMetrics.max <= P.floorMax;
     const output = safe ? { positions, indices } : { positions: mesh.positions, indices: mesh.indices };
     const outputAudit = safe ? finalAudit : referenceAudit;
+    const outDeviation = safe ? deviation : undefined;
     const allWarnings = [
+      ...warningsEarly,
       ...warnings,
       ...finalAudit.reasons,
       ...(!safe ? ['A tolerância geométrica foi excedida; o melhor estado seguro foi mantido.'] : []),
+      ...(targetTooAggressive ? [`Alvo agressivo demais — sugestão segura: ${safeTriangleSuggestion.toLocaleString('pt-BR')} faces. Use "contagem segura".`] : []),
     ];
     const volumeDeltaPercent =
       (Math.abs(Math.abs(outputAudit.volume) - Math.abs(referenceAudit.volume)) /
@@ -277,6 +353,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     const areaDeltaPercent =
       (Math.abs(outputAudit.surfaceArea - referenceAudit.surfaceArea) /
         Math.max(referenceAudit.surfaceArea, 1e-24)) * 100;
+    const hausdorffApprox = Math.max(lastMetrics.max, 0);
     return {
       positions: output.positions,
       indices: output.indices,
@@ -286,8 +363,12 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       warnings: allWarnings,
       stoppedSafely: stoppedSafely || !safe,
       elapsedMs: performance.now() - startedAt,
+      deviation: outDeviation,
+      uvs: safe ? extra?.uvs : mesh.uvs,
+      colors: safe ? extra?.colors : mesh.colors,
+      materialIds: safe ? extra?.materialIds : mesh.materialIds,
       validation: {
-        watertight: outputAudit.boundaryLoops === 0,
+        watertight: outputAudit.boundaryLoops === 0 && outputAudit.nonManifoldEdges === 0 && outputAudit.orientationConflicts === 0,
         boundaryLoops: outputAudit.boundaryLoops,
         nonManifoldEdges: outputAudit.nonManifoldEdges,
         volumeDeltaPercent,
@@ -313,6 +394,12 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
         escalations,
         effectiveProfile: curProfile ?? undefined,
         healing: runHealing,
+        hausdorffApprox,
+        components: componentCount,
+        componentFloorsHit,
+        errorBudget: options.errorBudget,
+        targetTooAggressive,
+        safeTriangleSuggestion,
       },
     };
   };
@@ -323,12 +410,24 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
 
   // ------------------------------------------------------------------
   // REFERÊNCIA ORIGINAL IMUTÁVEL (nunca modificada durante a conversão)
+  // UMA PASSADA a partir do original: nunca reduzir modelo já reduzido.
   // ------------------------------------------------------------------
   const vertexCount = mesh.positions.length / 3;
   const pos = new Float64Array(mesh.positions.length);
   for (let i = 0; i < mesh.positions.length; i += 1) pos[i] = mesh.positions[i];
+  const origPos = new Float64Array(pos);
   const tri = new Int32Array(mesh.indices.length);
   for (let i = 0; i < mesh.indices.length; i += 1) tri[i] = mesh.indices[i];
+  // Atributos paralelos (SoA): interpolados no colapso, nunca descartados.
+  const hasUV = !!mesh.uvs && mesh.uvs.length === vertexCount * 2;
+  const hasColors = !!mesh.colors && mesh.colors.length === vertexCount * 3;
+  const hasMaterials = !!mesh.materialIds && mesh.materialIds.length === vertexCount;
+  const attrUV = hasUV ? new Float64Array(mesh.uvs as Float32Array) : null;
+  const attrColors = hasColors ? new Float64Array(mesh.colors as Float32Array) : null;
+  const attrMat = hasMaterials ? new Uint32Array(mesh.materialIds as Uint32Array) : null;
+  const preserveUV = options.preserveUV !== false;
+  const preserveMaterials = options.preserveMaterials !== false;
+  const preserveColors = options.preserveColors !== false;
   const triAlive = new Uint8Array(originalTriangles).fill(1);
   const vertAlive = new Uint8Array(vertexCount).fill(1);
   const vertVersion = new Uint32Array(vertexCount);
@@ -533,7 +632,8 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
 
   /** Próximo perfil da cascata (null = teto atingido ou modo legado). */
   const nextProfile = (profile: ReductionProfile | undefined): ReductionProfile | null => {
-    if (profile === 'quality') return 'balanced';
+    // Quality is a fixed contract: never silently switch to a looser profile.
+    if (profile === 'quality') return null;
     if (profile === 'balanced') return 'aggressive';
     if (profile === 'aggressive') return 'maximum';
     return null;
@@ -613,7 +713,23 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     }
     const key = edgeKeyOf(a, b);
     const borderPenalty = (options.preserveSilhouette || mustRemainWatertight) && edgeCounts.get(key) === 1 ? 1000 : 1;
-    return (Math.max(0, qem) / qemScale) * imp * quotaMult * borderPenalty;
+    // Proteção de atributos: UV seam / material / cor incompatível encarece o colapso.
+    let attrPenalty = 1;
+    if (attrMat && preserveMaterials && attrMat[a] !== attrMat[b]) attrPenalty *= 50;
+    if (attrUV && preserveUV) {
+      const du = attrUV[a * 2] - attrUV[b * 2];
+      const dv = attrUV[a * 2 + 1] - attrUV[b * 2 + 1];
+      const uvDist = Math.hypot(du, dv);
+      if (uvDist > 0.05) attrPenalty *= 1 + Math.min(20, uvDist * 40);
+    }
+    if (attrColors && preserveColors) {
+      const dr = attrColors[a * 3] - attrColors[b * 3];
+      const dg = attrColors[a * 3 + 1] - attrColors[b * 3 + 1];
+      const db = attrColors[a * 3 + 2] - attrColors[b * 3 + 2];
+      const cDist = Math.hypot(dr, dg, db);
+      if (cDist > 0.08) attrPenalty *= 1 + Math.min(10, cDist * 12);
+    }
+    return (Math.max(0, qem) / qemScale) * imp * quotaMult * borderPenalty * attrPenalty;
   };
 
   const pushEdge = (a: number, b: number): void => {
@@ -704,6 +820,8 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       return reject('stale');
     }
     if ((options.preserveBorders || mustRemainWatertight) && edgeCounts.get(key) === 1) return reject('border');
+    // Materiais incompatíveis nunca fundem automaticamente (metal ≠ tecido).
+    if (attrMat && preserveMaterials && attrMat[a] !== attrMat[b]) return reject('material');
 
     const aBoundary = vertOnBoundary[a] === 1;
     const bBoundary = vertOnBoundary[b] === 1;
@@ -1122,13 +1240,18 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
     reasons.push(...audit.reasons);
     if (!audit.valid) return { ok: false, kind: 'topology', reasons, mean: 0, max: 0, rms: 0, silhouette: 0, normal: 0, curvature: 0 };
     const tolForVolume = curProfile ? P.bndMax / 100 : 0.025;
-    if (!auditWithinTolerance(audit, referenceAudit, tolForVolume)) {
+    const volumePercent = Math.abs(Math.abs(audit.volume) - Math.abs(referenceAudit.volume)) /
+      Math.max(Math.abs(referenceAudit.volume), Math.max(...referenceAudit.bounds.size, 1e-9) ** 3 * 1e-6) * 100;
+    if (!auditWithinTolerance(audit, referenceAudit, tolForVolume) || volumePercent > P.volMax) {
       reasons.push('Volume ou dimensões excederam a tolerância do estágio.');
       return { ok: false, kind: 'metric', reasons, mean: 0, max: 0, rms: 0, silhouette: 0, normal: 0, curvature: 0 };
     }
     // Superfície: vértices candidatos → grade estática da referência.
     const candVerts = candidate.positions.length / 3;
-    const err = directedSamplesError(refGrid, candidate.positions, candVerts, null, diagonal, candVerts * 3 > 200000 ? 500 : 900);
+    const backward = directedSamplesError(refGrid, candidate.positions, candVerts, null, diagonal, candVerts * 3 > 200000 ? 500 : 900);
+    // Checking both directions also catches detail removed from the original.
+    const forward = approximateSurfaceError(mesh, candidate, diagonal, 1500);
+    const err = { mean: Math.max(backward.mean, forward.mean), max: Math.max(backward.max, forward.max), rms: backward.rms };
     // Silhueta multivista (X, Y, Z + 4 diagonais).
     const sil = silhouetteError(mesh.positions, vertexCount, pos, vertexCount, vertAlive, diagonal);
     // Normal + curvatura amostrados sobre o estado de trabalho.
@@ -1360,8 +1483,10 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       }
       if (!check.ok && check.kind === 'metric' && attempts === 0) {
         if (attemptRepair()) {
-          const recheck = validateStage(buildCompact());
+          const repaired = buildCompact();
+          const recheck = validateStage(repaired);
           if (recheck.ok) {
+            compact = repaired;
             check = recheck;
           } else {
             warnings.push(`Reparo local insuficiente no estágio ${stage + 1}/${totalStages}; mantido o melhor estado válido.`);
@@ -1390,7 +1515,7 @@ export function simplifyMesh(mesh: MeshData, options: SimplifyOptions, onProgres
       const made = stageStartActive - activeTriangles;
       const needed = Math.max(1, stageStartActive - stageTarget);
       if (check.kind === 'metric' && made < needed * 0.02 && !timedOut()) {
-        if (escalations < 2 && attempts < 2) {
+        if (curProfile !== 'quality' && escalations < 2 && attempts < 2) {
           escalations += 1;
           planeMult *= 1.6;
           attempts += 1;
