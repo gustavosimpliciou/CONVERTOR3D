@@ -1,4 +1,3 @@
-import { orientStlForPrint, type StlOrientation } from './lib/mesh/stl-orientation';
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import {
   Box,
@@ -482,7 +481,6 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [gzBusy, setGzBusy] = useState(false);
-  const [stlOrientation, setStlOrientation] = useState<StlOrientation>('auto');
 
   const reset = useCallback(() => {
     procRef.current?.cancel();
@@ -621,11 +619,11 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
   const downloadGzip = useCallback(() => {
     if (!reduced || gzBusy) return;
     setGzBusy(true);
-    void packGzip(new Uint8Array(orientStlForPrint(reduced.stl, stlOrientation))).then((gz) => {
+    void packGzip(new Uint8Array(reduced.stl)).then((gz) => {
       const copy = gz.buffer.slice(0) as ArrayBuffer;
       downloadBytes(copy, reducedName(fileRef.current?.name ?? 'modelo.stl') + '.gz', 'application/gzip');
     }).finally(() => setGzBusy(false));
-  }, [reduced, gzBusy, stlOrientation]);
+  }, [reduced, gzBusy]);
 
   useEffect(() => () => { procRef.current?.cancel(); }, []);
 
@@ -726,17 +724,8 @@ function ReductionHome({ onModeChange }: { onModeChange: (mode: AppMode) => void
         <section className="result-report" aria-label="Informações da redução">
           {rows.map(([label, value]) => <div className="result-metric" key={label}><span>{label}</span><strong>{value}</strong></div>)}
         </section>
-        <label className="result-orientation">Orientação do STL
-          <select className="field" value={stlOrientation} onChange={(event) => setStlOrientation(event.target.value as StlOrientation)}>
-            <option value="auto">Em pé — maior dimensão no eixo Z</option>
-            <option value="original">Manter orientação original</option>
-            <option value="x">Eixo X original na vertical</option>
-            <option value="y">Eixo Y original na vertical</option>
-            <option value="z">Eixo Z original na vertical</option>
-          </select>
-        </label>
         <div className="result-actions" aria-label="Downloads">
-          <button className="button-primary" onClick={() => downloadStl(orientStlForPrint(reduced.stl, stlOrientation), model.name)} disabled={!valid} data-testid="button-download-stl"><Download size={14} /> Baixar STL reduzido</button>
+          <button className="button-primary" onClick={() => downloadStl(reduced.stl, model.name)} disabled={!valid} data-testid="button-download-stl"><Download size={14} /> Baixar STL reduzido</button>
           <button className="button-secondary" onClick={downloadGzip} disabled={gzBusy || !valid} data-testid="button-download-gzip"><Download size={14} /> {gzBusy ? 'Gerando .gz…' : 'Baixar .gz'}</button>
           <button className="button-secondary" onClick={() => { setReduced(null); setPhase('ready'); }}><SlidersHorizontal size={14} /> Nova redução</button>
           <button className="button-secondary" onClick={reset}><X size={14} /> Novo arquivo</button>

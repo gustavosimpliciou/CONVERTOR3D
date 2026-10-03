@@ -231,5 +231,3 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 
 .compact-shell > main { margin-top: 0; margin-bottom: calc(-1 * var(--workspace-overflow, 0px)); }
 
-.result-orientation { display: flex; align-items: center; gap: 12px; font-size: 11px; color: #b7aca3; }
-.result-orientation select { width: auto; flex: 1; padding: 5px 8px; font-size: 11px; }
